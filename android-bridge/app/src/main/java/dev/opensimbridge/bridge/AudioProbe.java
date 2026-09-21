@@ -43,6 +43,15 @@ final class AudioProbe {
                             || context.checkSelfPermission(Manifest.permission.RECORD_AUDIO)
                             == PackageManager.PERMISSION_GRANTED);
 
+            obj.put("capture_audio_output",
+                    Build.VERSION.SDK_INT < 23
+                            || context.checkSelfPermission("android.permission.CAPTURE_AUDIO_OUTPUT")
+                            == PackageManager.PERMISSION_GRANTED);
+            obj.put("modify_audio_routing",
+                    Build.VERSION.SDK_INT < 23
+                            || context.checkSelfPermission("android.permission.MODIFY_AUDIO_ROUTING")
+                            == PackageManager.PERMISSION_GRANTED);
+
             if (am != null) {
                 obj.put("mode", am.getMode());
                 obj.put("mode_name", modeName(am.getMode()));
