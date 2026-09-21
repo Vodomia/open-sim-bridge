@@ -13,11 +13,12 @@ import android.widget.ScrollView;
 import android.widget.TextView;
 import android.widget.Toast;
 
+import java.util.ArrayList;
 import java.util.List;
 import java.util.Locale;
 
 public final class MainActivity extends Activity {
-    private static final int SMS_PERMISSION_REQUEST = 1001;
+    private static final int PERMISSION_REQUEST = 1001;
 
     private TextView status;
     private TextView urls;
@@ -29,7 +30,7 @@ public final class MainActivity extends Activity {
         super.onCreate(savedInstanceState);
         setContentView(buildUi());
         refreshUi();
-        requestSmsPermissionIfNeeded();
+        requestPermissionsIfNeeded();
     }
 
     @Override
@@ -46,12 +47,12 @@ public final class MainActivity extends Activity {
         root.setPadding(pad, pad, pad, pad);
 
         TextView title = new TextView(this);
-        title.setText("Open SIM Bridge — M0.1");
+        title.setText("Open SIM Bridge — Telephony Prototype");
         title.setTextSize(24);
         root.addView(title);
 
         TextView warning = new TextView(this);
-        warning.setText("\nPROTOTYPE: Do not use real banking OTPs before M1 encrypted pairing is finished.\n");
+        warning.setText("\nPROTOTYPE: Local transport is not yet M1 encrypted. Use only harmless test SMS/calls.\n");
         root.addView(warning);
 
         status = new TextView(this);
@@ -66,9 +67,14 @@ public final class MainActivity extends Activity {
         root.addView(urls);
 
         Button start = new Button(this);
-        start.setText("Start local bridge");
+        start.setText("Start / refresh local bridge");
         start.setOnClickListener(v -> startBridge());
         root.addView(start);
+
+        Button permissions = new Button(this);
+        permissions.setText("Grant missing telephony permissions");
+        permissions.setOnClickListener(v -> requestPermissionsIfNeeded());
+        root.addView(permissions);
 
         Button stop = new Button(this);
         stop.setText("Stop local bridge");
@@ -79,7 +85,7 @@ public final class MainActivity extends Activity {
         root.addView(stop);
 
         TextView pairingLabel = new TextView(this);
-        pairingLabel.setText("\n6-digit pairing code:");
+        pairingLabel.setText("\nTemporary pairing code:");
         root.addView(pairingLabel);
 
         pairingCode = new TextView(this);
@@ -95,17 +101,8 @@ public final class MainActivity extends Activity {
         regenerate.setOnClickListener(v -> {
             PairingStore.regenerate(this);
             refreshUi();
-            Toast.makeText(this, "New pairing code generated", Toast.LENGTH_SHORT).show();
         });
         root.addView(regenerate);
-
-        Button clear = new Button(this);
-        clear.setText("Clear stored test messages");
-        clear.setOnClickListener(v -> {
-            SmsStore.clear(this);
-            Toast.makeText(this, "Messages cleared", Toast.LENGTH_SHORT).show();
-        });
-        root.addView(clear);
 
         ScrollView scroll = new ScrollView(this);
         scroll.addView(root);
@@ -113,10 +110,12 @@ public final class MainActivity extends Activity {
     }
 
     private void refreshUi() {
-        boolean allowed = Build.VERSION.SDK_INT < 23
-                || checkSelfPermission(Manifest.permission.RECEIVE_SMS) == PackageManager.PERMISSION_GRANTED;
-
-        status.setText("SMS permission: " + (allowed ? "granted" : "not granted"));
+        List<String> missing = missingPermissions();
+        status.setText(
+                missing.isEmpty()
+                        ? "Telephony permissions: granted"
+                        : "Missing permissions: " + join(missing)
+        );
 
         List<String> list = NetworkInfoUtil.localUrls(LocalHttpServer.PORT);
         StringBuilder sb = new StringBuilder();
@@ -125,24 +124,56 @@ public final class MainActivity extends Activity {
 
         pairingCode.setText(PairingStore.currentCode(this));
         long seconds = Math.max(0L, PairingStore.expiresInMs(this) / 1000L);
-        long minutes = seconds / 60L;
-        long remainingSeconds = seconds % 60L;
         pairingExpiry.setText(String.format(
                 Locale.US,
                 "Valid for about %d:%02d",
-                minutes,
-                remainingSeconds
+                seconds / 60L,
+                seconds % 60L
         ));
     }
 
-    private void requestSmsPermissionIfNeeded() {
-        if (Build.VERSION.SDK_INT >= 23
-                && checkSelfPermission(Manifest.permission.RECEIVE_SMS)
-                != PackageManager.PERMISSION_GRANTED) {
-            requestPermissions(
-                    new String[]{Manifest.permission.RECEIVE_SMS},
-                    SMS_PERMISSION_REQUEST
-            );
+    private List<String> missingPermissions() {
+        List<String> missing = new ArrayList<>();
+        if (Build.VERSION.SDK_INT < 23) return missing;
+
+        addIfMissing(missing, Manifest.permission.RECEIVE_SMS, "RECEIVE_SMS");
+        addIfMissing(missing, Manifest.permission.SEND_SMS, "SEND_SMS");
+        addIfMissing(missing, Manifest.permission.READ_PHONE_STATE, "READ_PHONE_STATE");
+        addIfMissing(missing, Manifest.permission.READ_CALL_LOG, "READ_CALL_LOG");
+        addIfMissing(missing, Manifest.permission.CALL_PHONE, "CALL_PHONE");
+        if (Build.VERSION.SDK_INT >= 26) {
+            addIfMissing(missing, Manifest.permission.ANSWER_PHONE_CALLS, "ANSWER_PHONE_CALLS");
+        }
+        return missing;
+    }
+
+    private void addIfMissing(List<String> list, String permission, String label) {
+        if (checkSelfPermission(permission) != PackageManager.PERMISSION_GRANTED) {
+            list.add(label);
+        }
+    }
+
+    private void requestPermissionsIfNeeded() {
+        if (Build.VERSION.SDK_INT < 23) return;
+
+        ArrayList<String> permissions = new ArrayList<>();
+        addPermissionIfMissing(permissions, Manifest.permission.RECEIVE_SMS);
+        addPermissionIfMissing(permissions, Manifest.permission.SEND_SMS);
+        addPermissionIfMissing(permissions, Manifest.permission.READ_PHONE_STATE);
+        addPermissionIfMissing(permissions, Manifest.permission.READ_CALL_LOG);
+        addPermissionIfMissing(permissions, Manifest.permission.CALL_PHONE);
+        if (Build.VERSION.SDK_INT >= 26) {
+            addPermissionIfMissing(permissions, Manifest.permission.ANSWER_PHONE_CALLS);
+        }
+
+        if (!permissions.isEmpty()) {
+            requestPermissions(permissions.toArray(new String[0]), PERMISSION_REQUEST);
+        }
+    }
+
+    private void addPermissionIfMissing(List<String> list, String permission) {
+        if (checkSelfPermission(permission) != PackageManager.PERMISSION_GRANTED) {
+            list.add(permission);
         }
     }
 
@@ -153,7 +184,7 @@ public final class MainActivity extends Activity {
         } else {
             startService(intent);
         }
-        Toast.makeText(this, "Local bridge started", Toast.LENGTH_SHORT).show();
+        Toast.makeText(this, "Bridge active", Toast.LENGTH_SHORT).show();
         refreshUi();
     }
 
@@ -165,6 +196,18 @@ public final class MainActivity extends Activity {
     ) {
         super.onRequestPermissionsResult(requestCode, permissions, grantResults);
         refreshUi();
+        if (requestCode == PERMISSION_REQUEST) {
+            startBridge();
+        }
+    }
+
+    private String join(List<String> values) {
+        StringBuilder sb = new StringBuilder();
+        for (int i = 0; i < values.size(); i++) {
+            if (i > 0) sb.append(", ");
+            sb.append(values.get(i));
+        }
+        return sb.toString();
     }
 
     private int dp(int value) {
