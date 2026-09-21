@@ -6,6 +6,7 @@ import android.content.Intent;
 import android.content.pm.PackageManager;
 import android.os.Build;
 import android.os.Bundle;
+import android.telecom.TelecomManager;
 import android.view.View;
 import android.widget.Button;
 import android.widget.LinearLayout;
@@ -24,6 +25,7 @@ public final class MainActivity extends Activity {
     private TextView urls;
     private TextView pairingCode;
     private TextView pairingExpiry;
+    private TextView dialerStatus;
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
@@ -52,11 +54,19 @@ public final class MainActivity extends Activity {
         root.addView(title);
 
         TextView warning = new TextView(this);
-        warning.setText("\nPROTOTYPE: Local transport is not yet M1 encrypted. Use only harmless test SMS/calls.\n");
+        warning.setText("\nPrototype. For API 27 end/reject testing, Open SIM Bridge must temporarily be the default phone app.\n");
         root.addView(warning);
 
         status = new TextView(this);
         root.addView(status);
+
+        dialerStatus = new TextView(this);
+        root.addView(dialerStatus);
+
+        Button defaultDialer = new Button(this);
+        defaultDialer.setText("Set Open SIM Bridge as default phone app");
+        defaultDialer.setOnClickListener(v -> requestDefaultDialer());
+        root.addView(defaultDialer);
 
         TextView urlLabel = new TextView(this);
         urlLabel.setText("\nLocal URL(s):");
@@ -78,10 +88,7 @@ public final class MainActivity extends Activity {
 
         Button stop = new Button(this);
         stop.setText("Stop local bridge");
-        stop.setOnClickListener(v -> {
-            stopService(new Intent(this, BridgeService.class));
-            Toast.makeText(this, "Bridge stopped", Toast.LENGTH_SHORT).show();
-        });
+        stop.setOnClickListener(v -> stopService(new Intent(this, BridgeService.class)));
         root.addView(stop);
 
         TextView pairingLabel = new TextView(this);
@@ -117,6 +124,10 @@ public final class MainActivity extends Activity {
                         : "Missing permissions: " + join(missing)
         );
 
+        dialerStatus.setText(
+                "Default phone app: " + (isDefaultDialer() ? "YES" : "NO")
+        );
+
         List<String> list = NetworkInfoUtil.localUrls(LocalHttpServer.PORT);
         StringBuilder sb = new StringBuilder();
         for (String value : list) sb.append(value).append("\n");
@@ -130,6 +141,29 @@ public final class MainActivity extends Activity {
                 seconds / 60L,
                 seconds % 60L
         ));
+    }
+
+    private boolean isDefaultDialer() {
+        if (Build.VERSION.SDK_INT < 23) return false;
+        TelecomManager telecom =
+                (TelecomManager) getSystemService(TELECOM_SERVICE);
+        return telecom != null
+                && getPackageName().equals(telecom.getDefaultDialerPackage());
+    }
+
+    private void requestDefaultDialer() {
+        if (Build.VERSION.SDK_INT < 23) return;
+
+        Intent intent = new Intent(TelecomManager.ACTION_CHANGE_DEFAULT_DIALER);
+        intent.putExtra(
+                TelecomManager.EXTRA_CHANGE_DEFAULT_DIALER_PACKAGE_NAME,
+                getPackageName()
+        );
+        try {
+            startActivity(intent);
+        } catch (Exception e) {
+            Toast.makeText(this, "Default dialer request failed", Toast.LENGTH_LONG).show();
+        }
     }
 
     private List<String> missingPermissions() {
@@ -196,9 +230,7 @@ public final class MainActivity extends Activity {
     ) {
         super.onRequestPermissionsResult(requestCode, permissions, grantResults);
         refreshUi();
-        if (requestCode == PERMISSION_REQUEST) {
-            startBridge();
-        }
+        if (requestCode == PERMISSION_REQUEST) startBridge();
     }
 
     private String join(List<String> values) {
