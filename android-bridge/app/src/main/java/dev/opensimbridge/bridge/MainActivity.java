@@ -2,9 +2,6 @@ package dev.opensimbridge.bridge;
 
 import android.Manifest;
 import android.app.Activity;
-import android.content.ClipData;
-import android.content.ClipboardManager;
-import android.content.Context;
 import android.content.Intent;
 import android.content.pm.PackageManager;
 import android.os.Build;
@@ -17,13 +14,15 @@ import android.widget.TextView;
 import android.widget.Toast;
 
 import java.util.List;
+import java.util.Locale;
 
 public final class MainActivity extends Activity {
     private static final int SMS_PERMISSION_REQUEST = 1001;
 
     private TextView status;
     private TextView urls;
-    private TextView token;
+    private TextView pairingCode;
+    private TextView pairingExpiry;
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
@@ -31,6 +30,12 @@ public final class MainActivity extends Activity {
         setContentView(buildUi());
         refreshUi();
         requestSmsPermissionIfNeeded();
+    }
+
+    @Override
+    protected void onResume() {
+        super.onResume();
+        if (status != null) refreshUi();
     }
 
     private View buildUi() {
@@ -41,7 +46,7 @@ public final class MainActivity extends Activity {
         root.setPadding(pad, pad, pad, pad);
 
         TextView title = new TextView(this);
-        title.setText("Open SIM Bridge — M0");
+        title.setText("Open SIM Bridge — M0.1");
         title.setTextSize(24);
         root.addView(title);
 
@@ -73,26 +78,26 @@ public final class MainActivity extends Activity {
         });
         root.addView(stop);
 
-        TextView tokenLabel = new TextView(this);
-        tokenLabel.setText("\nLocal access token:");
-        root.addView(tokenLabel);
+        TextView pairingLabel = new TextView(this);
+        pairingLabel.setText("\n6-digit pairing code:");
+        root.addView(pairingLabel);
 
-        token = new TextView(this);
-        token.setTextIsSelectable(true);
-        root.addView(token);
+        pairingCode = new TextView(this);
+        pairingCode.setTextSize(32);
+        pairingCode.setTextIsSelectable(true);
+        root.addView(pairingCode);
 
-        Button copyToken = new Button(this);
-        copyToken.setText("Copy token");
-        copyToken.setOnClickListener(v -> {
-            ClipboardManager clipboard =
-                    (ClipboardManager) getSystemService(Context.CLIPBOARD_SERVICE);
-            clipboard.setPrimaryClip(ClipData.newPlainText(
-                    "Open SIM Bridge token",
-                    TokenStore.getOrCreate(this)
-            ));
-            Toast.makeText(this, "Token copied", Toast.LENGTH_SHORT).show();
+        pairingExpiry = new TextView(this);
+        root.addView(pairingExpiry);
+
+        Button regenerate = new Button(this);
+        regenerate.setText("Generate new pairing code");
+        regenerate.setOnClickListener(v -> {
+            PairingStore.regenerate(this);
+            refreshUi();
+            Toast.makeText(this, "New pairing code generated", Toast.LENGTH_SHORT).show();
         });
-        root.addView(copyToken);
+        root.addView(regenerate);
 
         Button clear = new Button(this);
         clear.setText("Clear stored test messages");
@@ -118,7 +123,16 @@ public final class MainActivity extends Activity {
         for (String value : list) sb.append(value).append("\n");
         urls.setText(sb.toString());
 
-        token.setText(TokenStore.getOrCreate(this));
+        pairingCode.setText(PairingStore.currentCode(this));
+        long seconds = Math.max(0L, PairingStore.expiresInMs(this) / 1000L);
+        long minutes = seconds / 60L;
+        long remainingSeconds = seconds % 60L;
+        pairingExpiry.setText(String.format(
+                Locale.US,
+                "Valid for about %d:%02d",
+                minutes,
+                remainingSeconds
+        ));
     }
 
     private void requestSmsPermissionIfNeeded() {
