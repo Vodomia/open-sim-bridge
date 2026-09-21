@@ -3,7 +3,6 @@ package dev.opensimbridge.bridge;
 import android.Manifest;
 import android.content.Context;
 import android.content.pm.PackageManager;
-import android.media.AudioAttributes;
 import android.media.AudioDeviceInfo;
 import android.media.AudioFormat;
 import android.media.AudioManager;
@@ -17,7 +16,17 @@ import org.json.JSONException;
 import org.json.JSONObject;
 
 final class AudioProbe {
-    private static final int SAMPLE_RATE = 16000;
+    private static final int DEFAULT_SAMPLE_RATE = 16000;
+    private static final int[] SAMPLE_RATES = new int[]{16000, 8000, 44100, 48000};
+    private static final String[] CAPTURE_SOURCES = new String[]{
+            "mic",
+            "voice_communication",
+            "voice_recognition",
+            "unprocessed",
+            "voice_uplink",
+            "voice_downlink",
+            "voice_call"
+    };
 
     private AudioProbe() {}
 
@@ -26,6 +35,9 @@ final class AudioProbe {
         try {
             AudioManager am = (AudioManager) context.getSystemService(Context.AUDIO_SERVICE);
             obj.put("sdk_int", Build.VERSION.SDK_INT);
+            obj.put("manufacturer", Build.MANUFACTURER);
+            obj.put("model", Build.MODEL);
+            obj.put("device", Build.DEVICE);
             obj.put("record_audio",
                     Build.VERSION.SDK_INT < 23
                             || context.checkSelfPermission(Manifest.permission.RECORD_AUDIO)
@@ -40,23 +52,13 @@ final class AudioProbe {
                 if (Build.VERSION.SDK_INT >= 23) {
                     JSONArray inputs = new JSONArray();
                     for (AudioDeviceInfo device : am.getDevices(AudioManager.GET_DEVICES_INPUTS)) {
-                        JSONObject d = new JSONObject();
-                        d.put("id", device.getId());
-                        d.put("type", device.getType());
-                        d.put("type_name", deviceTypeName(device.getType()));
-                        d.put("product", String.valueOf(device.getProductName()));
-                        inputs.put(d);
+                        inputs.put(deviceJson(device));
                     }
                     obj.put("inputs", inputs);
 
                     JSONArray outputs = new JSONArray();
                     for (AudioDeviceInfo device : am.getDevices(AudioManager.GET_DEVICES_OUTPUTS)) {
-                        JSONObject d = new JSONObject();
-                        d.put("id", device.getId());
-                        d.put("type", device.getType());
-                        d.put("type_name", deviceTypeName(device.getType()));
-                        d.put("product", String.valueOf(device.getProductName()));
-                        outputs.put(d);
+                        outputs.put(deviceJson(device));
                     }
                     obj.put("outputs", outputs);
                 }
@@ -87,9 +89,7 @@ final class AudioProbe {
     }
 
     static String capture(Context context, String sourceName) {
-        if (Build.VERSION.SDK_INT >= 23
-                && context.checkSelfPermission(Manifest.permission.RECORD_AUDIO)
-                != PackageManager.PERMISSION_GRANTED) {
+        if (!hasRecordPermission(context)) {
             return simpleError("permission_denied", "RECORD_AUDIO permission is not granted");
         }
 
@@ -98,43 +98,266 @@ final class AudioProbe {
             return simpleError("unknown_source", "Unknown audio source: " + sourceName);
         }
 
-        int minBuffer = AudioRecord.getMinBufferSize(
-                SAMPLE_RATE,
-                AudioFormat.CHANNEL_IN_MONO,
-                AudioFormat.ENCODING_PCM_16BIT
-        );
-        if (minBuffer <= 0) {
-            return simpleError("bad_min_buffer", "AudioRecord min buffer: " + minBuffer);
+        return captureAtRate(sourceName, source, DEFAULT_SAMPLE_RATE, 900).toString();
+    }
+
+    static String fullCaptureScan(Context context) {
+        if (!hasRecordPermission(context)) {
+            return simpleError("permission_denied", "RECORD_AUDIO permission is not granted");
         }
 
-        AudioRecord record = null;
+        JSONObject root = new JSONObject();
+        JSONArray results = new JSONArray();
+
         try {
+            root.put("ok", true);
+            root.put("manufacturer", Build.MANUFACTURER);
+            root.put("model", Build.MODEL);
+            root.put("device", Build.DEVICE);
+            root.put("sdk_int", Build.VERSION.SDK_INT);
+            root.put("note",
+                    "No audio is stored. Each source is sampled briefly and only level/init metrics are returned.");
+
+            AudioManager am = (AudioManager) context.getSystemService(Context.AUDIO_SERVICE);
+            if (am != null) {
+                root.put("mode", modeName(am.getMode()));
+                root.put("speakerphone", am.isSpeakerphoneOn());
+            }
+            root.put("incall_service_active", BridgeInCallService.isActive());
+
+            for (String sourceName : CAPTURE_SOURCES) {
+                JSONObject sourceResult = new JSONObject();
+                sourceResult.put("source", sourceName);
+
+                int source = sourceFromName(sourceName);
+                sourceResult.put("source_id", source);
+
+                if (source < 0) {
+                    sourceResult.put("ok", false);
+                    sourceResult.put("code", "unsupported_source");
+                    results.put(sourceResult);
+                    continue;
+                }
+
+                JSONArray attempts = new JSONArray();
+                JSONObject firstWorking = null;
+
+                for (int sampleRate : SAMPLE_RATES) {
+                    JSONObject attempt = captureAtRate(sourceName, source, sampleRate, 280);
+                    attempts.put(attempt);
+
+                    if (attempt.optBoolean("ok", false)) {
+                        firstWorking = attempt;
+                        break;
+                    }
+
+                    String code = attempt.optString("code", "");
+                    if ("security_exception".equals(code)
+                            || "permission_denied".equals(code)) {
+                        break;
+                    }
+                }
+
+                sourceResult.put("attempts", attempts);
+                sourceResult.put("ok", firstWorking != null);
+                if (firstWorking != null) {
+                    sourceResult.put("working_sample_rate", firstWorking.optInt("sample_rate"));
+                    sourceResult.put("peak", firstWorking.optInt("peak"));
+                    sourceResult.put("rms_dbfs", firstWorking.optDouble("rms_dbfs"));
+                    sourceResult.put("looks_silent", firstWorking.optBoolean("looks_silent"));
+                }
+                results.put(sourceResult);
+            }
+
+            root.put("results", results);
+            return root.toString();
+        } catch (JSONException e) {
+            return simpleError("scan_json_failed", safeMessage(e));
+        }
+    }
+
+    static String playTone(String routeName) {
+        final int streamType =
+                "voice_call".equalsIgnoreCase(routeName)
+                        ? AudioManager.STREAM_VOICE_CALL
+                        : AudioManager.STREAM_MUSIC;
+
+        JSONArray attempts = new JSONArray();
+
+        for (int sampleRate : SAMPLE_RATES) {
+            int minBuffer = AudioTrack.getMinBufferSize(
+                    sampleRate,
+                    AudioFormat.CHANNEL_OUT_MONO,
+                    AudioFormat.ENCODING_PCM_16BIT
+            );
+
+            JSONObject attempt = new JSONObject();
+            try {
+                attempt.put("sample_rate", sampleRate);
+                attempt.put("min_buffer", minBuffer);
+            } catch (JSONException ignored) {
+            }
+
+            if (minBuffer <= 0) {
+                try {
+                    attempt.put("ok", false);
+                    attempt.put("code", "bad_min_buffer");
+                } catch (JSONException ignored) {
+                }
+                attempts.put(attempt);
+                continue;
+            }
+
+            final int samples = (int) (sampleRate * 0.75);
+            final short[] pcm = makeTone(sampleRate, samples);
+            final int bufferBytes = Math.max(minBuffer * 2, 4096);
+
+            AudioTrack track = null;
+            try {
+                track = new AudioTrack(
+                        streamType,
+                        sampleRate,
+                        AudioFormat.CHANNEL_OUT_MONO,
+                        AudioFormat.ENCODING_PCM_16BIT,
+                        bufferBytes,
+                        AudioTrack.MODE_STREAM
+                );
+
+                if (track.getState() != AudioTrack.STATE_INITIALIZED) {
+                    attempt.put("ok", false);
+                    attempt.put("code", "not_initialized");
+                    attempts.put(attempt);
+                    track.release();
+                    continue;
+                }
+
+                final AudioTrack liveTrack = track;
+                track = null;
+
+                attempt.put("ok", true);
+                attempt.put("code", "started");
+                attempts.put(attempt);
+
+                new Thread(() -> {
+                    try {
+                        liveTrack.setVolume(0.25f);
+                        liveTrack.play();
+                        int offset = 0;
+                        while (offset < pcm.length) {
+                            int n = liveTrack.write(pcm, offset, pcm.length - offset);
+                            if (n <= 0) break;
+                            offset += n;
+                        }
+                        Thread.sleep(120L);
+                    } catch (Exception ignored) {
+                    } finally {
+                        try {
+                            liveTrack.stop();
+                        } catch (Exception ignored) {
+                        }
+                        liveTrack.release();
+                    }
+                }, "osb-audio-tone").start();
+
+                JSONObject result = new JSONObject();
+                result.put("ok", true);
+                result.put("stream", routeName);
+                result.put("sample_rate", sampleRate);
+                result.put("frequency_hz", 700);
+                result.put("duration_ms", 750);
+                result.put("attempts", attempts);
+                result.put("note",
+                        "Tone started on Android output stream. This does NOT prove cellular uplink injection; confirm on the remote phone.");
+                return result.toString();
+            } catch (Exception e) {
+                try {
+                    attempt.put("ok", false);
+                    attempt.put("code", "exception");
+                    attempt.put("message", safeMessage(e));
+                } catch (JSONException ignored) {
+                }
+                attempts.put(attempt);
+            } finally {
+                if (track != null) {
+                    try {
+                        track.release();
+                    } catch (Exception ignored) {
+                    }
+                }
+            }
+        }
+
+        JSONObject result = new JSONObject();
+        try {
+            result.put("ok", false);
+            result.put("code", "tone_init_failed");
+            result.put("message", "No tested AudioTrack configuration initialized");
+            result.put("stream", routeName);
+            result.put("attempts", attempts);
+            return result.toString();
+        } catch (JSONException e) {
+            return simpleError("tone_init_failed", "No tested AudioTrack configuration initialized");
+        }
+    }
+
+    private static JSONObject captureAtRate(
+            String sourceName,
+            int source,
+            int sampleRate,
+            int durationMs
+    ) {
+        JSONObject obj = new JSONObject();
+        AudioRecord record = null;
+
+        try {
+            obj.put("source", sourceName);
+            obj.put("source_id", source);
+            obj.put("sample_rate", sampleRate);
+
+            int minBuffer = AudioRecord.getMinBufferSize(
+                    sampleRate,
+                    AudioFormat.CHANNEL_IN_MONO,
+                    AudioFormat.ENCODING_PCM_16BIT
+            );
+            obj.put("min_buffer", minBuffer);
+
+            if (minBuffer <= 0) {
+                obj.put("ok", false);
+                obj.put("code", "bad_min_buffer");
+                return obj;
+            }
+
             int bufferBytes = Math.max(minBuffer * 2, 4096);
             record = new AudioRecord(
                     source,
-                    SAMPLE_RATE,
+                    sampleRate,
                     AudioFormat.CHANNEL_IN_MONO,
                     AudioFormat.ENCODING_PCM_16BIT,
                     bufferBytes
             );
 
             if (record.getState() != AudioRecord.STATE_INITIALIZED) {
-                return simpleError("not_initialized", "AudioRecord did not initialize");
+                obj.put("ok", false);
+                obj.put("code", "not_initialized");
+                return obj;
             }
 
             record.startRecording();
 
-            short[] buffer = new short[1024];
+            short[] buffer = new short[512];
             long sumSquares = 0L;
             int peak = 0;
             int samples = 0;
             int nonZero = 0;
-            long deadline = System.currentTimeMillis() + 900L;
+            long deadline = System.currentTimeMillis() + durationMs;
 
             while (System.currentTimeMillis() < deadline) {
                 int n = record.read(buffer, 0, buffer.length);
                 if (n < 0) {
-                    return simpleError("read_failed", "AudioRecord read returned " + n);
+                    obj.put("ok", false);
+                    obj.put("code", "read_failed");
+                    obj.put("read_result", n);
+                    return obj;
                 }
 
                 for (int i = 0; i < n; i++) {
@@ -147,24 +370,37 @@ final class AudioProbe {
                 samples += n;
             }
 
-            double rms = samples > 0 ? Math.sqrt((double) sumSquares / (double) samples) : 0.0;
-            double rmsDbfs = rms > 0.0 ? 20.0 * Math.log10(rms / 32768.0) : -120.0;
+            double rms = samples > 0
+                    ? Math.sqrt((double) sumSquares / (double) samples)
+                    : 0.0;
+            double rmsDbfs = rms > 0.0
+                    ? 20.0 * Math.log10(rms / 32768.0)
+                    : -120.0;
 
-            JSONObject obj = new JSONObject();
             obj.put("ok", true);
-            obj.put("source", sourceName);
-            obj.put("source_id", source);
             obj.put("samples", samples);
             obj.put("nonzero_samples", nonZero);
             obj.put("peak", peak);
             obj.put("rms", Math.round(rms * 10.0) / 10.0);
             obj.put("rms_dbfs", Math.round(rmsDbfs * 10.0) / 10.0);
             obj.put("looks_silent", peak < 64 || nonZero < Math.max(1, samples / 100));
-            return obj.toString();
+            return obj;
         } catch (SecurityException e) {
-            return simpleError("security_exception", safeMessage(e));
+            try {
+                obj.put("ok", false);
+                obj.put("code", "security_exception");
+                obj.put("message", safeMessage(e));
+            } catch (JSONException ignored) {
+            }
+            return obj;
         } catch (Exception e) {
-            return error("capture_failed", e);
+            try {
+                obj.put("ok", false);
+                obj.put("code", "capture_failed");
+                obj.put("message", safeMessage(e));
+            } catch (JSONException ignored) {
+            }
+            return obj;
         } finally {
             if (record != null) {
                 try {
@@ -181,70 +417,40 @@ final class AudioProbe {
         }
     }
 
-    static String playTone(String routeName) {
-        final int streamType;
-        if ("voice_call".equalsIgnoreCase(routeName)) {
-            streamType = AudioManager.STREAM_VOICE_CALL;
-        } else {
-            streamType = AudioManager.STREAM_MUSIC;
-        }
-
-        final int samples = (int) (SAMPLE_RATE * 0.75);
-        final short[] pcm = new short[samples];
-        final double frequency = 700.0;
-        final double amplitude = 0.07 * 32767.0;
+    private static short[] makeTone(int sampleRate, int samples) {
+        short[] pcm = new short[samples];
+        double frequency = 700.0;
+        double amplitude = 0.06 * 32767.0;
+        int fadeSamples = Math.max(1, sampleRate / 50);
 
         for (int i = 0; i < samples; i++) {
             double fade = 1.0;
-            int fadeSamples = SAMPLE_RATE / 50;
             if (i < fadeSamples) fade = (double) i / fadeSamples;
-            if (i > samples - fadeSamples) fade = (double) (samples - i) / fadeSamples;
-            pcm[i] = (short) (Math.sin(2.0 * Math.PI * frequency * i / SAMPLE_RATE)
-                    * amplitude * Math.max(0.0, Math.min(1.0, fade)));
-        }
-
-        try {
-            final AudioTrack track = new AudioTrack(
-                    streamType,
-                    SAMPLE_RATE,
-                    AudioFormat.CHANNEL_OUT_MONO,
-                    AudioFormat.ENCODING_PCM_16BIT,
-                    pcm.length * 2,
-                    AudioTrack.MODE_STATIC
-            );
-
-            if (track.getState() != AudioTrack.STATE_INITIALIZED) {
-                track.release();
-                return simpleError("tone_init_failed", "AudioTrack did not initialize");
+            if (i > samples - fadeSamples) {
+                fade = (double) (samples - i) / fadeSamples;
             }
-
-            track.write(pcm, 0, pcm.length);
-            track.setVolume(0.35f);
-
-            new Thread(() -> {
-                try {
-                    track.play();
-                    Thread.sleep(1100L);
-                } catch (Exception ignored) {
-                } finally {
-                    try {
-                        track.stop();
-                    } catch (Exception ignored) {
-                    }
-                    track.release();
-                }
-            }, "osb-audio-tone").start();
-
-            JSONObject obj = new JSONObject();
-            obj.put("ok", true);
-            obj.put("stream", routeName);
-            obj.put("frequency_hz", 700);
-            obj.put("duration_ms", 750);
-            obj.put("note", "Low-level test tone started on the J7 audio output");
-            return obj.toString();
-        } catch (Exception e) {
-            return error("tone_failed", e);
+            pcm[i] = (short) (
+                    Math.sin(2.0 * Math.PI * frequency * i / sampleRate)
+                            * amplitude
+                            * Math.max(0.0, Math.min(1.0, fade))
+            );
         }
+        return pcm;
+    }
+
+    private static boolean hasRecordPermission(Context context) {
+        return Build.VERSION.SDK_INT < 23
+                || context.checkSelfPermission(Manifest.permission.RECORD_AUDIO)
+                == PackageManager.PERMISSION_GRANTED;
+    }
+
+    private static JSONObject deviceJson(AudioDeviceInfo device) throws JSONException {
+        JSONObject d = new JSONObject();
+        d.put("id", device.getId());
+        d.put("type", device.getType());
+        d.put("type_name", deviceTypeName(device.getType()));
+        d.put("product", String.valueOf(device.getProductName()));
+        return d;
     }
 
     private static int sourceFromName(String name) {
