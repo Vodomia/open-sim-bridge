@@ -14,6 +14,7 @@ public final class BridgeService extends Service {
     private static final int NOTIFICATION_ID = 8787;
 
     private LocalHttpServer server;
+    private CallMonitor callMonitor;
 
     @Override
     public void onCreate() {
@@ -36,13 +37,16 @@ public final class BridgeService extends Service {
 
         Notification notification = builder
                 .setContentTitle("Open SIM Bridge")
-                .setContentText("Local bridge is running")
-                .setSmallIcon(android.R.drawable.stat_sys_upload_done)
+                .setContentText("SMS + call prototype is running")
+                .setSmallIcon(android.R.drawable.stat_sys_phone_call)
                 .setOngoing(true)
                 .setContentIntent(pendingIntent)
                 .build();
 
         startForeground(NOTIFICATION_ID, notification);
+
+        callMonitor = new CallMonitor(this);
+        callMonitor.start();
 
         try {
             server = new LocalHttpServer(this);
@@ -54,12 +58,17 @@ public final class BridgeService extends Service {
 
     @Override
     public int onStartCommand(Intent intent, int flags, int startId) {
+        if (callMonitor != null) {
+            callMonitor.stop();
+            callMonitor.start();
+        }
         return START_STICKY;
     }
 
     @Override
     public void onDestroy() {
         if (server != null) server.stop();
+        if (callMonitor != null) callMonitor.stop();
         super.onDestroy();
     }
 
