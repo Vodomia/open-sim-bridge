@@ -165,6 +165,12 @@ final class LocalHttpServer {
                 return;
             }
 
+            if ("POST".equals(request.method) && "/api/audio/full-scan".equals(request.path)) {
+                write(client, 200, "application/json; charset=utf-8",
+                        AudioProbe.fullCaptureScan(context));
+                return;
+            }
+
             if ("POST".equals(request.method) && "/api/audio/tone".equals(request.path)) {
                 write(client, 200, "application/json; charset=utf-8",
                         AudioProbe.playTone(request.params.get("stream")));
@@ -251,6 +257,7 @@ final class LocalHttpServer {
                 + "<option value=\"voice_downlink\">VOICE_DOWNLINK (expected restricted)</option>"
                 + "<option value=\"voice_uplink\">VOICE_UPLINK (expected restricted)</option></select>"
                 + "<button onclick=\"captureProbe()\">Capture 0.9s audio probe</button>"
+                + "<button onclick=\"fullAudioScan()\">Run full audio scan</button>"
                 + "<div class=\"row\"><button onclick=\"playTone('music')\">Play low test tone (music)</button><button onclick=\"playTone('voice_call')\">Play low test tone (voice-call stream)</button></div>"
                 + "<div id=\"audioResult\" class=\"muted\"></div></div>"
                 + "<button onclick=\"forgetPairing()\">Forget pairing</button>"
@@ -274,6 +281,7 @@ final class LocalHttpServer {
                 + "async function refreshAudio(){try{const d=await apiGet('/api/audio/status');audioStatus.textContent='Mode '+d.mode_name+' · speaker '+(d.speakerphone?'ON':'OFF')+' · InCallService '+(d.incall_service_active?'active':'inactive')+' · RECORD_AUDIO '+(d.record_audio?'OK':'NO');}catch(e){audioStatus.textContent='Audio status failed';}}"
                 + "async function routeAudio(target){audioResult.textContent='Routing…';try{const d=await apiPost('/api/audio/route',{target:target});audioResult.textContent=JSON.stringify(d);refreshAudio();}catch(e){audioResult.textContent='Route request failed';}}"
                 + "async function captureProbe(){audioResult.textContent='Listening for 0.9s… have the other side speak now';try{const d=await apiPost('/api/audio/capture-probe',{source:audioSource.value});audioResult.textContent=JSON.stringify(d);refreshAudio();}catch(e){audioResult.textContent='Capture probe failed';}}"
+                + "async function fullAudioScan(){audioResult.textContent='Scanning all audio inputs… keep speaker OFF, stay quiet, and have the other phone speak continuously for a few seconds';try{const d=await apiPost('/api/audio/full-scan',{});audioResult.textContent=JSON.stringify(d);refreshAudio();}catch(e){audioResult.textContent='Full audio scan failed';}}"
                 + "async function playTone(stream){audioResult.textContent='Starting low-level 700 Hz tone…';try{const d=await apiPost('/api/audio/tone',{stream:stream});audioResult.textContent=JSON.stringify(d);}catch(e){audioResult.textContent='Tone test failed';}}"
                 + "function forgetPairing(){localStorage.removeItem('osb_token');if(timer)clearInterval(timer);timer=null;setConnected(false);}"
                 + "if(token()){setConnected(true);startPolling();loadCapabilities();refreshAudio();}else{setConnected(false);}"
