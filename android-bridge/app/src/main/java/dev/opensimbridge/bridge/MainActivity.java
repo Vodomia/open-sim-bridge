@@ -47,12 +47,12 @@ public final class MainActivity extends Activity {
         root.setPadding(pad, pad, pad, pad);
 
         TextView title = new TextView(this);
-        title.setText("Open SIM Bridge — Call State Probe");
+        title.setText("Open SIM Bridge — Telephony Prototype");
         title.setTextSize(24);
         root.addView(title);
 
         TextView warning = new TextView(this);
-        warning.setText("\nMinimal probe: incoming SMS + GSM call state only. No SMS sending or call control in this build.\n");
+        warning.setText("\nPROTOTYPE: Local transport is not yet M1 encrypted. Use only harmless test SMS/calls.\n");
         root.addView(warning);
 
         status = new TextView(this);
@@ -72,9 +72,17 @@ public final class MainActivity extends Activity {
         root.addView(start);
 
         Button permissions = new Button(this);
-        permissions.setText("Grant missing permissions");
+        permissions.setText("Grant missing telephony permissions");
         permissions.setOnClickListener(v -> requestPermissionsIfNeeded());
         root.addView(permissions);
+
+        Button stop = new Button(this);
+        stop.setText("Stop local bridge");
+        stop.setOnClickListener(v -> {
+            stopService(new Intent(this, BridgeService.class));
+            Toast.makeText(this, "Bridge stopped", Toast.LENGTH_SHORT).show();
+        });
+        root.addView(stop);
 
         TextView pairingLabel = new TextView(this);
         pairingLabel.setText("\nTemporary pairing code:");
@@ -105,7 +113,7 @@ public final class MainActivity extends Activity {
         List<String> missing = missingPermissions();
         status.setText(
                 missing.isEmpty()
-                        ? "Permissions: granted"
+                        ? "Telephony permissions: granted"
                         : "Missing permissions: " + join(missing)
         );
 
@@ -127,8 +135,15 @@ public final class MainActivity extends Activity {
     private List<String> missingPermissions() {
         List<String> missing = new ArrayList<>();
         if (Build.VERSION.SDK_INT < 23) return missing;
+
         addIfMissing(missing, Manifest.permission.RECEIVE_SMS, "RECEIVE_SMS");
+        addIfMissing(missing, Manifest.permission.SEND_SMS, "SEND_SMS");
         addIfMissing(missing, Manifest.permission.READ_PHONE_STATE, "READ_PHONE_STATE");
+        addIfMissing(missing, Manifest.permission.READ_CALL_LOG, "READ_CALL_LOG");
+        addIfMissing(missing, Manifest.permission.CALL_PHONE, "CALL_PHONE");
+        if (Build.VERSION.SDK_INT >= 26) {
+            addIfMissing(missing, Manifest.permission.ANSWER_PHONE_CALLS, "ANSWER_PHONE_CALLS");
+        }
         return missing;
     }
 
@@ -143,7 +158,13 @@ public final class MainActivity extends Activity {
 
         ArrayList<String> permissions = new ArrayList<>();
         addPermissionIfMissing(permissions, Manifest.permission.RECEIVE_SMS);
+        addPermissionIfMissing(permissions, Manifest.permission.SEND_SMS);
         addPermissionIfMissing(permissions, Manifest.permission.READ_PHONE_STATE);
+        addPermissionIfMissing(permissions, Manifest.permission.READ_CALL_LOG);
+        addPermissionIfMissing(permissions, Manifest.permission.CALL_PHONE);
+        if (Build.VERSION.SDK_INT >= 26) {
+            addPermissionIfMissing(permissions, Manifest.permission.ANSWER_PHONE_CALLS);
+        }
 
         if (!permissions.isEmpty()) {
             requestPermissions(permissions.toArray(new String[0]), PERMISSION_REQUEST);
