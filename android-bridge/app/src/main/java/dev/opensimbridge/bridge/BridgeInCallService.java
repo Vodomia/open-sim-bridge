@@ -73,6 +73,17 @@ public final class BridgeInCallService extends InCallService {
         }
     }
 
+    static boolean setMutedState(boolean muted) {
+        BridgeInCallService service = instance;
+        if (service == null) return false;
+        try {
+            service.setMuted(muted);
+            return true;
+        } catch (Exception e) {
+            return false;
+        }
+    }
+
     static String audioStateJson() {
         JSONObject obj = new JSONObject();
         try {
