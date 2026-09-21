@@ -147,6 +147,30 @@ final class LocalHttpServer {
                 return;
             }
 
+            if ("GET".equals(request.method) && "/api/audio/status".equals(request.path)) {
+                write(client, 200, "application/json; charset=utf-8",
+                        AudioProbe.status(context));
+                return;
+            }
+
+            if ("POST".equals(request.method) && "/api/audio/route".equals(request.path)) {
+                write(client, 200, "application/json; charset=utf-8",
+                        AudioProbe.route("speaker".equals(request.params.get("target"))));
+                return;
+            }
+
+            if ("POST".equals(request.method) && "/api/audio/capture-probe".equals(request.path)) {
+                write(client, 200, "application/json; charset=utf-8",
+                        AudioProbe.capture(context, request.params.get("source")));
+                return;
+            }
+
+            if ("POST".equals(request.method) && "/api/audio/tone".equals(request.path)) {
+                write(client, 200, "application/json; charset=utf-8",
+                        AudioProbe.playTone(request.params.get("stream")));
+                return;
+            }
+
             write(client, 404, "application/json; charset=utf-8",
                     "{\"error\":\"not_found\"}");
         } catch (Exception ignored) {
@@ -216,6 +240,19 @@ final class LocalHttpServer {
                 + "<textarea id=\"smsBody\" rows=\"3\" placeholder=\"Test message\"></textarea>"
                 + "<button onclick=\"sendSms()\">Send SMS</button>"
                 + "<div id=\"smsResult\" class=\"muted\"></div></div>"
+                + "<div class=\"card\"><b>M4 Audio Lab</b>"
+                + "<div class=\"muted\">Use only during a harmless test call. Keep the other phone nearby so you can confirm what it hears.</div>"
+                + "<div id=\"audioStatus\" class=\"muted\">Audio status not loaded</div>"
+                + "<div class=\"row\"><button onclick=\"routeAudio('speaker')\">Route speaker</button><button onclick=\"routeAudio('earpiece')\">Route earpiece</button></div>"
+                + "<select id=\"audioSource\" style=\"font:inherit;padding:12px;margin:5px 0;width:100%;box-sizing:border-box\">"
+                + "<option value=\"mic\">MIC</option><option value=\"voice_communication\">VOICE_COMMUNICATION</option>"
+                + "<option value=\"voice_recognition\">VOICE_RECOGNITION</option><option value=\"unprocessed\">UNPROCESSED</option>"
+                + "<option value=\"voice_call\">VOICE_CALL (expected restricted)</option>"
+                + "<option value=\"voice_downlink\">VOICE_DOWNLINK (expected restricted)</option>"
+                + "<option value=\"voice_uplink\">VOICE_UPLINK (expected restricted)</option></select>"
+                + "<button onclick=\"captureProbe()\">Capture 0.9s audio probe</button>"
+                + "<div class=\"row\"><button onclick=\"playTone('music')\">Play low test tone (music)</button><button onclick=\"playTone('voice_call')\">Play low test tone (voice-call stream)</button></div>"
+                + "<div id=\"audioResult\" class=\"muted\"></div></div>"
                 + "<button onclick=\"forgetPairing()\">Forget pairing</button>"
                 + "<h3>Incoming SMS</h3><div id=\"messages\"></div>"
                 + "</div>"
@@ -234,8 +271,12 @@ final class LocalHttpServer {
                 + "async function dial(){callResult.textContent='Dialing…';try{const d=await apiPost('/api/call/dial',{number:dialNumber.value.trim()});callResult.textContent=d.code+': '+d.message;}catch(e){callResult.textContent='Request failed';}}"
                 + "async function answer(){try{const d=await apiPost('/api/call/answer',{});callResult.textContent=d.code+': '+d.message;}catch(e){callResult.textContent='Request failed';}}"
                 + "async function endCall(){try{const d=await apiPost('/api/call/end',{});callResult.textContent=d.code+': '+d.message;}catch(e){callResult.textContent='Request failed';}}"
+                + "async function refreshAudio(){try{const d=await apiGet('/api/audio/status');audioStatus.textContent='Mode '+d.mode_name+' · speaker '+(d.speakerphone?'ON':'OFF')+' · InCallService '+(d.incall_service_active?'active':'inactive')+' · RECORD_AUDIO '+(d.record_audio?'OK':'NO');}catch(e){audioStatus.textContent='Audio status failed';}}"
+                + "async function routeAudio(target){audioResult.textContent='Routing…';try{const d=await apiPost('/api/audio/route',{target:target});audioResult.textContent=JSON.stringify(d);refreshAudio();}catch(e){audioResult.textContent='Route request failed';}}"
+                + "async function captureProbe(){audioResult.textContent='Listening for 0.9s… have the other side speak now';try{const d=await apiPost('/api/audio/capture-probe',{source:audioSource.value});audioResult.textContent=JSON.stringify(d);refreshAudio();}catch(e){audioResult.textContent='Capture probe failed';}}"
+                + "async function playTone(stream){audioResult.textContent='Starting low-level 700 Hz tone…';try{const d=await apiPost('/api/audio/tone',{stream:stream});audioResult.textContent=JSON.stringify(d);}catch(e){audioResult.textContent='Tone test failed';}}"
                 + "function forgetPairing(){localStorage.removeItem('osb_token');if(timer)clearInterval(timer);timer=null;setConnected(false);}"
-                + "if(token()){setConnected(true);startPolling();loadCapabilities();}else{setConnected(false);}"
+                + "if(token()){setConnected(true);startPolling();loadCapabilities();refreshAudio();}else{setConnected(false);}"
                 + "</script></body></html>";
     }
 }
