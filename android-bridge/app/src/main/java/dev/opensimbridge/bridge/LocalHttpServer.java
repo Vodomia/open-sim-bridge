@@ -153,6 +153,12 @@ final class LocalHttpServer {
                 return;
             }
 
+            if ("GET".equals(request.method) && "/api/system/readiness".equals(request.path)) {
+                write(client, 200, "application/json; charset=utf-8",
+                        SystemReadinessProbe.report(context));
+                return;
+            }
+
             if ("POST".equals(request.method) && "/api/audio/route".equals(request.path)) {
                 write(client, 200, "application/json; charset=utf-8",
                         AudioProbe.route("speaker".equals(request.params.get("target"))));
@@ -257,6 +263,10 @@ final class LocalHttpServer {
                 + "<textarea id=\"smsBody\" rows=\"3\" placeholder=\"Test message\"></textarea>"
                 + "<button onclick=\"sendSms()\">Send SMS</button>"
                 + "<div id=\"smsResult\" class=\"muted\"></div></div>"
+                + "<div class=\"card\"><b>System readiness</b>"
+                + "<div class=\"muted\">Read-only probe for the privileged-audio experiment.</div>"
+                + "<button onclick=\"systemReadiness()\">Run system readiness probe</button>"
+                + "<pre id=\"systemResult\" class=\"muted\" style=\"white-space:pre-wrap;word-break:break-word\"></pre></div>"
                 + "<div class=\"card\"><b>M4 Audio Lab</b>"
                 + "<div class=\"muted\">Use only during a harmless test call. Keep the other phone nearby so you can confirm what it hears.</div>"
                 + "<div id=\"audioStatus\" class=\"muted\">Audio status not loaded</div>"
@@ -291,6 +301,7 @@ final class LocalHttpServer {
                 + "async function answer(){try{const d=await apiPost('/api/call/answer',{});callResult.textContent=d.code+': '+d.message;}catch(e){callResult.textContent='Request failed';}}"
                 + "async function endCall(){try{const d=await apiPost('/api/call/end',{});callResult.textContent=d.code+': '+d.message;}catch(e){callResult.textContent='Request failed';}}"
                 + "async function refreshAudio(){try{const d=await apiGet('/api/audio/status');audioStatus.textContent='Mode '+d.mode_name+' · speaker '+(d.speakerphone?'ON':'OFF')+' · InCallService '+(d.incall_service_active?'active':'inactive')+' · RECORD_AUDIO '+(d.record_audio?'OK':'NO');}catch(e){audioStatus.textContent='Audio status failed';}}"
+                + "async function systemReadiness(){systemResult.textContent='Reading device state…';try{const d=await apiGet('/api/system/readiness');systemResult.textContent=JSON.stringify(d,null,2);}catch(e){systemResult.textContent='Readiness probe failed';}}"
                 + "async function routeAudio(target){audioResult.textContent='Routing…';try{const d=await apiPost('/api/audio/route',{target:target});audioResult.textContent=JSON.stringify(d);refreshAudio();}catch(e){audioResult.textContent='Route request failed';}}"
                 + "async function setCallMute(muted){audioResult.textContent=muted?'Muting call microphone…':'Unmuting call microphone…';try{const d=await apiPost('/api/audio/mute',{muted:muted?'true':'false'});audioResult.textContent=JSON.stringify(d);refreshAudio();}catch(e){audioResult.textContent='Mute request failed';}}"
                 + "async function captureProbe(){audioResult.textContent='Listening for 0.9s… have the other side speak now';try{const d=await apiPost('/api/audio/capture-probe',{source:audioSource.value});audioResult.textContent=JSON.stringify(d);refreshAudio();}catch(e){audioResult.textContent='Capture probe failed';}}"
