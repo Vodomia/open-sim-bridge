@@ -7,7 +7,9 @@ import android.content.pm.PackageManager;
 import android.net.Uri;
 import android.os.Build;
 import android.os.Bundle;
+import android.telecom.Call;
 import android.telecom.TelecomManager;
+import android.telecom.VideoProfile;
 import android.telephony.SmsManager;
 
 import org.json.JSONException;
@@ -74,9 +76,20 @@ final class TelephonyController {
     }
 
     static String answer(Context context) {
+        Call call = CallRegistry.get();
+        if (call != null && call.getState() == Call.STATE_RINGING) {
+            try {
+                call.answer(VideoProfile.STATE_AUDIO_ONLY);
+                return result(true, "answered_via_incall",
+                        "Answer requested through InCallService");
+            } catch (Exception e) {
+                return result(false, "answer_failed", safeMessage(e));
+            }
+        }
+
         if (Build.VERSION.SDK_INT < 26) {
             return result(false, "unsupported_android",
-                    "Public answer-call API requires Android 8.0 / API 26+");
+                    "No active InCallService call and public answer API needs API 26+");
         }
         if (!hasPermission(context, Manifest.permission.ANSWER_PHONE_CALLS)) {
             return result(false, "permission_denied",
@@ -97,32 +110,46 @@ final class TelephonyController {
     }
 
     static String end(Context context) {
-        if (Build.VERSION.SDK_INT < 28) {
-            return result(false, "unsupported_android",
-                    "Public end-call API requires Android 9 / API 28+");
-        }
-        if (!hasPermission(context, Manifest.permission.ANSWER_PHONE_CALLS)) {
-            return result(false, "permission_denied",
-                    "ANSWER_PHONE_CALLS permission is not granted");
+        Call call = CallRegistry.get();
+        if (call != null) {
+            try {
+                if (call.getState() == Call.STATE_RINGING) {
+                    call.reject(false, null);
+                    return result(true, "rejected_via_incall",
+                            "Incoming call rejected through InCallService");
+                }
+
+                call.disconnect();
+                return result(true, "disconnected_via_incall",
+                        "Call disconnect requested through InCallService");
+            } catch (Exception e) {
+                return result(false, "incall_disconnect_failed", safeMessage(e));
+            }
         }
 
-        try {
-            TelecomManager telecom =
-                    (TelecomManager) context.getSystemService(Context.TELECOM_SERVICE);
-            if (telecom == null) {
-                return result(false, "telecom_unavailable", "TelecomManager is unavailable");
+        if (Build.VERSION.SDK_INT >= 28
+                && hasPermission(context, Manifest.permission.ANSWER_PHONE_CALLS)) {
+            try {
+                TelecomManager telecom =
+                        (TelecomManager) context.getSystemService(Context.TELECOM_SERVICE);
+                if (telecom != null) {
+                    boolean ended = telecom.endCall();
+                    return result(ended, ended ? "ended" : "not_ended",
+                            ended ? "End call requested" : "Android did not end a call");
+                }
+            } catch (Exception e) {
+                return result(false, "end_failed", safeMessage(e));
             }
-            boolean ended = telecom.endCall();
-            return result(ended, ended ? "ended" : "not_ended",
-                    ended ? "End call requested" : "Android did not end a call");
-        } catch (Exception e) {
-            return result(false, "end_failed", safeMessage(e));
         }
+
+        return result(false, "incall_service_not_active",
+                "Set Open SIM Bridge as the default phone app, then retry");
     }
 
     static String capabilities(Context context) {
         JSONObject obj = new JSONObject();
         try {
+            boolean defaultDialer = isDefaultDialer(context);
             obj.put("sdk_int", Build.VERSION.SDK_INT);
             obj.put("send_sms", hasPermission(context, Manifest.permission.SEND_SMS));
             obj.put("read_phone_state", hasPermission(context, Manifest.permission.READ_PHONE_STATE));
@@ -132,10 +159,21 @@ final class TelephonyController {
                             && hasPermission(context, Manifest.permission.ANSWER_PHONE_CALLS));
             obj.put("public_answer_api", Build.VERSION.SDK_INT >= 26);
             obj.put("public_end_api", Build.VERSION.SDK_INT >= 28);
+            obj.put("default_dialer", defaultDialer);
+            obj.put("incall_active", CallRegistry.get() != null);
+            obj.put("incall_end_supported", defaultDialer && Build.VERSION.SDK_INT >= 23);
             return obj.toString();
         } catch (JSONException e) {
             return "{}";
         }
+    }
+
+    static boolean isDefaultDialer(Context context) {
+        if (Build.VERSION.SDK_INT < 23) return false;
+        TelecomManager telecom =
+                (TelecomManager) context.getSystemService(Context.TELECOM_SERVICE);
+        return telecom != null
+                && context.getPackageName().equals(telecom.getDefaultDialerPackage());
     }
 
     private static boolean hasPermission(Context context, String permission) {
