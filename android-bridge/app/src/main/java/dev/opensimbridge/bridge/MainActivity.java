@@ -175,6 +175,7 @@ public final class MainActivity extends Activity {
         addIfMissing(missing, Manifest.permission.READ_PHONE_STATE, "READ_PHONE_STATE");
         addIfMissing(missing, Manifest.permission.READ_CALL_LOG, "READ_CALL_LOG");
         addIfMissing(missing, Manifest.permission.CALL_PHONE, "CALL_PHONE");
+        addIfMissing(missing, Manifest.permission.RECORD_AUDIO, "RECORD_AUDIO");
         if (Build.VERSION.SDK_INT >= 26) {
             addIfMissing(missing, Manifest.permission.ANSWER_PHONE_CALLS, "ANSWER_PHONE_CALLS");
         }
@@ -196,6 +197,7 @@ public final class MainActivity extends Activity {
         addPermissionIfMissing(permissions, Manifest.permission.READ_PHONE_STATE);
         addPermissionIfMissing(permissions, Manifest.permission.READ_CALL_LOG);
         addPermissionIfMissing(permissions, Manifest.permission.CALL_PHONE);
+        addPermissionIfMissing(permissions, Manifest.permission.RECORD_AUDIO);
         if (Build.VERSION.SDK_INT >= 26) {
             addPermissionIfMissing(permissions, Manifest.permission.ANSWER_PHONE_CALLS);
         }
