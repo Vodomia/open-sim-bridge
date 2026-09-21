@@ -159,6 +159,17 @@ final class LocalHttpServer {
                 return;
             }
 
+            if ("POST".equals(request.method) && "/api/audio/mute".equals(request.path)) {
+                boolean muted = "true".equalsIgnoreCase(request.params.get("muted"));
+                boolean ok = BridgeInCallService.setMutedState(muted);
+                write(client, 200, "application/json; charset=utf-8",
+                        "{\"ok\":" + ok
+                                + ",\"muted\":" + muted
+                                + ",\"audio_state\":" + BridgeInCallService.audioStateJson()
+                                + "}");
+                return;
+            }
+
             if ("POST".equals(request.method) && "/api/audio/capture-probe".equals(request.path)) {
                 write(client, 200, "application/json; charset=utf-8",
                         AudioProbe.capture(context, request.params.get("source")));
@@ -250,6 +261,7 @@ final class LocalHttpServer {
                 + "<div class=\"muted\">Use only during a harmless test call. Keep the other phone nearby so you can confirm what it hears.</div>"
                 + "<div id=\"audioStatus\" class=\"muted\">Audio status not loaded</div>"
                 + "<div class=\"row\"><button onclick=\"routeAudio('speaker')\">Route speaker</button><button onclick=\"routeAudio('earpiece')\">Route earpiece</button></div>"
+                + "<div class=\"row\"><button onclick=\"setCallMute(true)\">Mute call mic</button><button onclick=\"setCallMute(false)\">Unmute call mic</button></div>"
                 + "<select id=\"audioSource\" style=\"font:inherit;padding:12px;margin:5px 0;width:100%;box-sizing:border-box\">"
                 + "<option value=\"mic\">MIC</option><option value=\"voice_communication\">VOICE_COMMUNICATION</option>"
                 + "<option value=\"voice_recognition\">VOICE_RECOGNITION</option><option value=\"unprocessed\">UNPROCESSED</option>"
@@ -280,6 +292,7 @@ final class LocalHttpServer {
                 + "async function endCall(){try{const d=await apiPost('/api/call/end',{});callResult.textContent=d.code+': '+d.message;}catch(e){callResult.textContent='Request failed';}}"
                 + "async function refreshAudio(){try{const d=await apiGet('/api/audio/status');audioStatus.textContent='Mode '+d.mode_name+' · speaker '+(d.speakerphone?'ON':'OFF')+' · InCallService '+(d.incall_service_active?'active':'inactive')+' · RECORD_AUDIO '+(d.record_audio?'OK':'NO');}catch(e){audioStatus.textContent='Audio status failed';}}"
                 + "async function routeAudio(target){audioResult.textContent='Routing…';try{const d=await apiPost('/api/audio/route',{target:target});audioResult.textContent=JSON.stringify(d);refreshAudio();}catch(e){audioResult.textContent='Route request failed';}}"
+                + "async function setCallMute(muted){audioResult.textContent=muted?'Muting call microphone…':'Unmuting call microphone…';try{const d=await apiPost('/api/audio/mute',{muted:muted?'true':'false'});audioResult.textContent=JSON.stringify(d);refreshAudio();}catch(e){audioResult.textContent='Mute request failed';}}"
                 + "async function captureProbe(){audioResult.textContent='Listening for 0.9s… have the other side speak now';try{const d=await apiPost('/api/audio/capture-probe',{source:audioSource.value});audioResult.textContent=JSON.stringify(d);refreshAudio();}catch(e){audioResult.textContent='Capture probe failed';}}"
                 + "async function fullAudioScan(){audioResult.textContent='Scanning all audio inputs… keep speaker OFF, stay quiet, and have the other phone speak continuously for a few seconds';try{const d=await apiPost('/api/audio/full-scan',{});audioResult.textContent=JSON.stringify(d);refreshAudio();}catch(e){audioResult.textContent='Full audio scan failed';}}"
                 + "async function playTone(stream){audioResult.textContent='Starting low-level 700 Hz tone…';try{const d=await apiPost('/api/audio/tone',{stream:stream});audioResult.textContent=JSON.stringify(d);}catch(e){audioResult.textContent='Tone test failed';}}"
