@@ -76,7 +76,9 @@ final class LocalHttpServer {
             // the device loopback interface (for example through adb forward).
             // It is never exposed to LAN clients and is not part of release behavior.
             if ("GET".equals(request.method) && "/api/debug/token".equals(request.path)) {
-                if (!BuildConfig.DEBUG || !remote.isLoopbackAddress()) {
+                if ((context.getApplicationInfo().flags
+                        & android.content.pm.ApplicationInfo.FLAG_DEBUGGABLE) == 0
+                        || !remote.isLoopbackAddress()) {
                     write(client, 403, "application/json; charset=utf-8",
                             "{\"error\":\"debug_loopback_only\"}");
                     return;
