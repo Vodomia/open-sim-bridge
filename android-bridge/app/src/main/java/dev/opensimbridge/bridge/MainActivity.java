@@ -33,6 +33,14 @@ public final class MainActivity extends Activity {
         setContentView(buildUi());
         refreshUi();
         requestPermissionsIfNeeded();
+
+        // ADB harness branch only: debug builds auto-start the local bridge
+        // once runtime permissions are already granted.
+        if ((getApplicationInfo().flags
+                & android.content.pm.ApplicationInfo.FLAG_DEBUGGABLE) != 0
+                && missingPermissions().isEmpty()) {
+            startBridge();
+        }
     }
 
     @Override
