@@ -72,6 +72,20 @@ final class LocalHttpServer {
                 return;
             }
 
+            // Debug-build-only ADB harness. This endpoint is reachable only from
+            // the device loopback interface (for example through adb forward).
+            // It is never exposed to LAN clients and is not part of release behavior.
+            if ("GET".equals(request.method) && "/api/debug/token".equals(request.path)) {
+                if (!BuildConfig.DEBUG || !remote.isLoopbackAddress()) {
+                    write(client, 403, "application/json; charset=utf-8",
+                            "{\"error\":\"debug_loopback_only\"}");
+                    return;
+                }
+                write(client, 200, "application/json; charset=utf-8",
+                        "{\"token\":\"" + TokenStore.getOrCreate(context) + "\"}");
+                return;
+            }
+
             if ("GET".equals(request.method) && "/api/pair".equals(request.path)) {
                 if (PairingStore.isLocked(context)) {
                     write(client, 429, "application/json; charset=utf-8",
