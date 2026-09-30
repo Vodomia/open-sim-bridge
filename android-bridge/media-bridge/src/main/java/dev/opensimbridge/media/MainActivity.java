@@ -1,15 +1,17 @@
 package dev.opensimbridge.media;
 
+import android.Manifest;
 import android.app.Activity;
 import android.content.Intent;
+import android.content.pm.PackageManager;
 import android.os.Build;
 import android.os.Bundle;
-import android.view.View;
 import android.widget.Button;
 import android.widget.LinearLayout;
 import android.widget.TextView;
 
 public final class MainActivity extends Activity {
+    private static final int REQ_AUDIO = 2001;
     private TextView status;
 
     @Override
@@ -36,7 +38,7 @@ public final class MainActivity extends Activity {
 
         Button start = new Button(this);
         start.setText("Start local SIP audio bridge");
-        start.setOnClickListener(v -> startBridge());
+        start.setOnClickListener(v -> ensurePermissionAndStart());
         root.addView(start);
 
         Button stop = new Button(this);
@@ -48,13 +50,39 @@ public final class MainActivity extends Activity {
         root.addView(stop);
 
         setContentView(root);
-        startBridge();
+        ensurePermissionAndStart();
     }
 
     @Override
     protected void onResume() {
         super.onResume();
         refresh();
+    }
+
+    private void ensurePermissionAndStart() {
+        if (Build.VERSION.SDK_INT >= 23
+                && checkSelfPermission(Manifest.permission.RECORD_AUDIO)
+                != PackageManager.PERMISSION_GRANTED) {
+            requestPermissions(new String[]{Manifest.permission.RECORD_AUDIO}, REQ_AUDIO);
+            return;
+        }
+        startBridge();
+    }
+
+    @Override
+    public void onRequestPermissionsResult(
+            int requestCode,
+            String[] permissions,
+            int[] grantResults
+    ) {
+        super.onRequestPermissionsResult(requestCode, permissions, grantResults);
+        if (requestCode == REQ_AUDIO
+                && grantResults.length > 0
+                && grantResults[0] == PackageManager.PERMISSION_GRANTED) {
+            startBridge();
+        } else {
+            refresh();
+        }
     }
 
     private void startBridge() {
@@ -66,9 +94,13 @@ public final class MainActivity extends Activity {
 
     private void refresh() {
         String ip = SipAudioBridge.localIpv4();
+        boolean granted = Build.VERSION.SDK_INT < 23
+                || checkSelfPermission(Manifest.permission.RECORD_AUDIO)
+                == PackageManager.PERMISSION_GRANTED;
         status.setText(
                 "SIP URI: sip:osb@" + ip + ":5060\n"
                 + "RTP codec: PCMU / 8000 Hz\n"
+                + "RECORD_AUDIO: " + (granted ? "granted" : "missing") + "\n"
                 + "State: " + MediaBridgeService.status()
         );
     }
