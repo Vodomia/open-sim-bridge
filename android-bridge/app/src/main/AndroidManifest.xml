@@ -1,4 +1,8 @@
 <manifest xmlns:android="http://schemas.android.com/apk/res/android">
+    <permission
+        android:name="dev.opensimbridge.permission.MEDIA_CONTROL"
+        android:protectionLevel="signature" />
+
     <uses-feature android:name="android.hardware.telephony" android:required="true" />
 
     <uses-permission android:name="android.permission.RECEIVE_SMS" />
@@ -56,6 +60,16 @@
             android:exported="true">
             <intent-filter>
                 <action android:name="android.intent.action.BOOT_COMPLETED" />
+            </intent-filter>
+        </receiver>
+
+        <receiver
+            android:name=".MediaCommandReceiver"
+            android:enabled="true"
+            android:exported="true"
+            android:permission="dev.opensimbridge.permission.MEDIA_CONTROL">
+            <intent-filter>
+                <action android:name="dev.opensimbridge.action.END_CELLULAR_CALL" />
             </intent-filter>
         </receiver>
 
