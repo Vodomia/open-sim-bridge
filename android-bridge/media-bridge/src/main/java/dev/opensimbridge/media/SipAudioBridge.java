@@ -45,6 +45,7 @@ final class SipAudioBridge {
 
     private volatile long txPackets;
     private volatile long rxPackets;
+    private volatile boolean vendorForwardingEnabled;
 
     void start() throws Exception {
         if (running) return;
@@ -182,6 +183,9 @@ final class SipAudioBridge {
     private void startMedia() {
         if (mediaRunning || remoteRtpAddress == null || remoteRtpPort <= 0) return;
 
+        vendorForwardingEnabled = VendorAudioControl.setCallForwarding(true);
+        Log.i(TAG, "vendor call_forwarding requested; enabled=" + vendorForwardingEnabled);
+
         mediaRunning = true;
         Log.i(TAG, "starting media; Android side 16k PCM, RTP PCMU/8k");
         MediaBridgeService.setStatus(
@@ -204,6 +208,11 @@ final class SipAudioBridge {
         if (rxThread != null) {
             try { rxThread.join(1200); } catch (InterruptedException ignored) {}
             rxThread = null;
+        }
+
+        if (vendorForwardingEnabled) {
+            VendorAudioControl.setCallForwarding(false);
+            vendorForwardingEnabled = false;
         }
 
         remoteRtpAddress = null;
