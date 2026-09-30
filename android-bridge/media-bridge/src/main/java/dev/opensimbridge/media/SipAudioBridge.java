@@ -1,7 +1,9 @@
 package dev.opensimbridge.media;
 
 import android.Manifest;
+import android.content.ComponentName;
 import android.content.Context;
+import android.content.Intent;
 import android.content.pm.PackageManager;
 import android.media.AudioFormat;
 import android.media.AudioManager;
@@ -187,12 +189,17 @@ final class SipAudioBridge {
 
         if (first.startsWith("BYE ") || first.startsWith("CANCEL ")) {
             Log.i(TAG, "call ended by SIP peer");
-            stopMedia();
+            boolean endCellular = outboundInviteActive || cellularOffhook;
             sendSip(peer, peerPort, response(request, 200, "OK", null));
+
             if (outboundInviteActive) {
-                Log.i(TAG, "iPhone ended auto-forwarded SIP leg; GSM leg left to Telecom/peer");
                 resetOutboundDialog();
             }
+            if (endCellular) {
+                requestCellularHangup("sip_peer_end");
+            }
+
+            stopMedia();
             MediaBridgeService.setStatus("listening sip:osb@" + localIpv4() + ":5060");
             return;
         }
@@ -200,8 +207,8 @@ final class SipAudioBridge {
         if (first.startsWith("REGISTER ")) {
             registeredSipAddress = peer;
             registeredSipPort = peerPort;
-            Log.i(TAG, "Linphone registered at " + peer.getHostAddress() + ":" + peerPort);
-            sendSip(peer, peerPort, response(request, 200, "OK", null));
+            Log.i(TAG, "SIP client registered at " + peer.getHostAddress() + ":" + peerPort);
+            sendSip(peer, peerPort, registerResponse(request));
 
             if (pendingCellularRing && !outboundInviteActive && !mediaRunning) {
                 Log.i(TAG, "pending GSM ring found after REGISTER -> auto INVITE now");
@@ -352,8 +359,9 @@ final class SipAudioBridge {
         }
 
         if (code >= 300) {
-            Log.i(TAG, "Linphone rejected auto INVITE SIP " + code);
+            Log.i(TAG, "SIP client rejected auto INVITE SIP " + code);
             resetOutboundDialog();
+            requestCellularHangup("sip_reject_" + code);
         }
     }
 
@@ -409,6 +417,41 @@ final class SipAudioBridge {
         } catch (Exception e) {
             Log.e(TAG, "GSM auto-answer failed", e);
         }
+    }
+
+    private void requestCellularHangup(String reason) {
+        try {
+            Intent intent = new Intent("dev.opensimbridge.action.END_CELLULAR_CALL");
+            intent.setComponent(new ComponentName(
+                    "dev.opensimbridge.bridge",
+                    "dev.opensimbridge.bridge.MediaCommandReceiver"
+            ));
+            intent.putExtra("reason", reason == null ? "" : reason);
+            context.sendBroadcast(intent);
+            Log.i(TAG, "requested cellular hangup via control bridge; reason=" + reason);
+        } catch (Exception e) {
+            Log.e(TAG, "cellular hangup request failed", e);
+        }
+    }
+
+    private static String registerResponse(String request) {
+        String base = response(request, 200, "OK", null);
+        int split = base.indexOf("\r\n\r\n");
+        if (split < 0) return base;
+
+        StringBuilder extra = new StringBuilder(base.substring(0, split));
+        String contact = header(request, "Contact");
+        String expires = header(request, "Expires");
+
+        if (contact != null && !contact.trim().isEmpty()) {
+            extra.append("\r\nContact: ").append(contact.trim());
+        }
+        if (expires != null && !expires.trim().isEmpty()) {
+            extra.append("\r\nExpires: ").append(expires.trim());
+        }
+
+        extra.append("\r\n\r\n");
+        return extra.toString();
     }
 
     private void sendOutboundTerminate() {
@@ -769,7 +812,7 @@ final class SipAudioBridge {
         if (callId != null) out.append("Call-ID: ").append(callId).append("\r\n");
         if (cseq != null) out.append("CSeq: ").append(cseq).append("\r\n");
         out.append("Server: OpenSIMBridge-M5\r\n");
-        out.append("Allow: INVITE, ACK, BYE, CANCEL, OPTIONS, INFO\r\n");
+        out.append("Allow: INVITE, ACK, BYE, CANCEL, OPTIONS, INFO, REGISTER\r\n");
 
         if (code >= 200 && code < 300 && request.startsWith("INVITE ")) {
             out.append("Contact: <sip:osb@").append(localIpv4()).append(":5060>\r\n");
