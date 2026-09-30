@@ -25,12 +25,19 @@ jobs:
         with:
           gradle-version: "8.9"
 
-      - name: Build debug APK
-        run: gradle -p android-bridge :app:assembleDebug
+      - name: Build debug APKs
+        run: gradle -p android-bridge :app:assembleDebug :media-bridge:assembleDebug
 
-      - name: Upload APK
+      - name: Upload control APK
         uses: actions/upload-artifact@v4
         with:
           name: open-sim-bridge-android-debug
           path: android-bridge/app/build/outputs/apk/debug/app-debug.apk
+          if-no-files-found: error
+
+      - name: Upload M5 media APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: open-sim-bridge-m5-media-debug
+          path: android-bridge/media-bridge/build/outputs/apk/debug/media-bridge-debug.apk
           if-no-files-found: error
