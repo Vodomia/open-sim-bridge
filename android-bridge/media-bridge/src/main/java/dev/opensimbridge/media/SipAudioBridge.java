@@ -270,9 +270,18 @@ final class SipAudioBridge {
             pendingCellularRing = false;
             Log.i(TAG, "GSM RINGING -> auto INVITE Linphone " + peer.getHostAddress() + ":" + port);
             MediaBridgeService.setStatus("incoming GSM -> ringing iPhone");
-            sendSip(peer, port, invite.toString());
+
+            final String inviteText = invite.toString();
+            new Thread(() -> {
+                try {
+                    sendSip(peer, port, inviteText);
+                } catch (Exception e) {
+                    Log.e(TAG, "auto INVITE failed", e);
+                    resetOutboundDialog();
+                }
+            }, "osb-sip-auto-invite").start();
         } catch (Exception e) {
-            Log.e(TAG, "auto INVITE failed", e);
+            Log.e(TAG, "auto INVITE prepare failed", e);
             resetOutboundDialog();
         }
     }
@@ -418,7 +427,7 @@ final class SipAudioBridge {
                     : outboundViaBranch;
             int cseq = outboundSipAnswered ? 2 : 1;
 
-            String msg = method + " " + outboundRequestUri + " SIP/2.0\r\n"
+            final String msg = method + " " + outboundRequestUri + " SIP/2.0\r\n"
                     + "Via: SIP/2.0/UDP " + ip + ":5060;branch=" + branch + ";rport\r\n"
                     + "Max-Forwards: 70\r\n"
                     + "From: <sip:osb@" + ip + ":5060>;tag=" + outboundFromTag + "\r\n"
@@ -426,9 +435,16 @@ final class SipAudioBridge {
                     + "Call-ID: " + outboundCallId + "\r\n"
                     + "CSeq: " + cseq + " " + method + "\r\n"
                     + "Content-Length: 0\r\n\r\n";
-            sendSip(peer, port, msg);
+
+            new Thread(() -> {
+                try {
+                    sendSip(peer, port, msg);
+                } catch (Exception e) {
+                    Log.w(TAG, "SIP terminate failed: " + safe(e));
+                }
+            }, "osb-sip-terminate").start();
         } catch (Exception e) {
-            Log.w(TAG, "SIP terminate failed: " + safe(e));
+            Log.w(TAG, "SIP terminate prepare failed: " + safe(e));
         }
     }
 
