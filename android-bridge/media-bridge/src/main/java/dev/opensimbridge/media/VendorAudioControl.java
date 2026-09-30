@@ -10,15 +10,15 @@ final class VendorAudioControl {
     private VendorAudioControl() {}
 
     static boolean setCallForwarding(boolean enabled) {
-        // Samsung universal7870 HAL compares this parameter to the literal strings
-        // "on"/"off". Numeric 1/0 is accepted by AudioSystem.setParameters() but
-        // does not switch the vendor call-forwarding route.
+        // Samsung universal7870 HAL compares this parameter with the literal
+        // values "on"/"off".
         String value = enabled ? "on" : "off";
         try {
             Class<?> audioSystem = Class.forName("android.media.AudioSystem");
             Method setParameters = audioSystem.getDeclaredMethod("setParameters", String.class);
             setParameters.setAccessible(true);
-            Object rc = setParameters.invoke(null, "call_forwarding=" + value);
+            Object rawRc = setParameters.invoke(null, "call_forwarding=" + value);
+            int rc = rawRc instanceof Number ? ((Number) rawRc).intValue() : -1;
 
             String current = "";
             try {
@@ -29,14 +29,14 @@ final class VendorAudioControl {
             } catch (Throwable ignored) {
             }
 
-            Log.i(TAG, "HAL call_forwarding=" + value + " rc=" + rc + " get=" + current);
+            boolean ok = rc == 0;
+            Log.i(TAG, "HAL call_forwarding=" + value + " rc=" + rc
+                    + " ok=" + ok + " get=" + current);
             MediaBridgeService.setStatus(
-                    "HAL call_forwarding=" + value + " rc=" + rc
+                    "HAL call_forwarding=" + value + " rc=" + rc + " ok=" + ok
                             + (current.isEmpty() ? "" : " get=" + current)
             );
-            // setParameters completed without throwing. Keep track of the requested
-            // state so stopMedia() always sends the matching "off" request later.
-            return true;
+            return ok;
         } catch (Throwable t) {
             Log.e(TAG, "HAL call_forwarding reflection failed", t);
             MediaBridgeService.setStatus("HAL call_forwarding failed: " + t.getClass().getSimpleName());
