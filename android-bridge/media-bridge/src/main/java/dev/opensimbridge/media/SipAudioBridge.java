@@ -57,6 +57,11 @@ final class SipAudioBridge {
     private volatile InetAddress registeredSipAddress;
     private volatile int registeredSipPort;
 
+    // If GSM starts ringing before Linphone has refreshed its REGISTER after boot/service restart,
+    // remember the ring and place the SIP INVITE as soon as REGISTER arrives.
+    private volatile boolean pendingCellularRing;
+    private volatile String pendingIncomingNumber = "";
+
     // Outbound SIP dialog used to ring the iPhone for an incoming GSM call.
     private volatile boolean outboundInviteActive;
     private volatile boolean outboundSipAnswered;
@@ -197,6 +202,11 @@ final class SipAudioBridge {
             registeredSipPort = peerPort;
             Log.i(TAG, "Linphone registered at " + peer.getHostAddress() + ":" + peerPort);
             sendSip(peer, peerPort, response(request, 200, "OK", null));
+
+            if (pendingCellularRing && !outboundInviteActive && !mediaRunning) {
+                Log.i(TAG, "pending GSM ring found after REGISTER -> auto INVITE now");
+                onCellularRinging(pendingIncomingNumber);
+            }
             return;
         }
 
@@ -209,6 +219,9 @@ final class SipAudioBridge {
     }
 
     void onCellularRinging(String incomingNumber) {
+        pendingCellularRing = true;
+        pendingIncomingNumber = incomingNumber == null ? "" : incomingNumber;
+
         if (!running || mediaRunning || outboundInviteActive) return;
 
         InetAddress peer = registeredSipAddress;
@@ -254,6 +267,7 @@ final class SipAudioBridge {
             invite.append("Content-Length: ").append(bodyBytes.length).append("\r\n\r\n");
             invite.append(sdp);
 
+            pendingCellularRing = false;
             Log.i(TAG, "GSM RINGING -> auto INVITE Linphone " + peer.getHostAddress() + ":" + port);
             MediaBridgeService.setStatus("incoming GSM -> ringing iPhone");
             sendSip(peer, port, invite.toString());
@@ -264,6 +278,8 @@ final class SipAudioBridge {
     }
 
     void onCellularOffhook() {
+        pendingCellularRing = false;
+        pendingIncomingNumber = "";
         cellularOffhook = true;
         Log.i(TAG, "cellular state OFFHOOK");
         if (outboundInviteActive && outboundSipAnswered
@@ -273,6 +289,8 @@ final class SipAudioBridge {
     }
 
     void onCellularIdle() {
+        pendingCellularRing = false;
+        pendingIncomingNumber = "";
         cellularOffhook = false;
         if (outboundInviteActive) {
             Log.i(TAG, "cellular state IDLE -> terminate outbound SIP leg");
