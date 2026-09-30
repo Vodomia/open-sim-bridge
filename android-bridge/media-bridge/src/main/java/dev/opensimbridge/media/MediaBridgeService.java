@@ -15,6 +15,7 @@ public final class MediaBridgeService extends Service {
     private static volatile String lastStatus = "stopped";
 
     private SipAudioBridge bridge;
+    private CellularCallMonitor callMonitor;
 
     static String status() {
         return lastStatus;
@@ -51,9 +52,21 @@ public final class MediaBridgeService extends Service {
                         .build()
         );
 
-        bridge = new SipAudioBridge();
+        bridge = new SipAudioBridge(this);
         try {
             bridge.start();
+            callMonitor = new CellularCallMonitor(this, new CellularCallMonitor.Listener() {
+                @Override public void onRinging(String incomingNumber) {
+                    bridge.onCellularRinging(incomingNumber);
+                }
+                @Override public void onOffhook() {
+                    bridge.onCellularOffhook();
+                }
+                @Override public void onIdle() {
+                    bridge.onCellularIdle();
+                }
+            });
+            callMonitor.start();
             setStatus("listening on sip:osb@" + SipAudioBridge.localIpv4() + ":5060");
         } catch (Exception e) {
             setStatus("start failed: " + safe(e));
@@ -68,6 +81,7 @@ public final class MediaBridgeService extends Service {
 
     @Override
     public void onDestroy() {
+        if (callMonitor != null) callMonitor.stop();
         if (bridge != null) bridge.stop();
         setStatus("stopped");
         super.onDestroy();
