@@ -1,10 +1,15 @@
 package dev.opensimbridge.media;
 
+import android.Manifest;
+import android.content.Context;
+import android.content.pm.PackageManager;
 import android.media.AudioFormat;
 import android.media.AudioManager;
 import android.media.AudioRecord;
 import android.media.AudioTrack;
 import android.media.MediaRecorder;
+import android.os.Build;
+import android.telecom.TelecomManager;
 import android.util.Log;
 
 import java.net.DatagramPacket;
@@ -21,6 +26,7 @@ import java.util.Random;
 
 final class SipAudioBridge {
     private static final String TAG = "OSB-M5";
+    private final Context context;
     private static final int SIP_PORT = 5060;
 
     // Proven working on this SM-G610F during the privileged-audio probe.
@@ -46,6 +52,24 @@ final class SipAudioBridge {
     private volatile long txPackets;
     private volatile long rxPackets;
     private volatile boolean vendorForwardingEnabled;
+
+    // Last Linphone UDP registration tuple on the J7 hotspot.
+    private volatile InetAddress registeredSipAddress;
+    private volatile int registeredSipPort;
+
+    // Outbound SIP dialog used to ring the iPhone for an incoming GSM call.
+    private volatile boolean outboundInviteActive;
+    private volatile boolean outboundSipAnswered;
+    private volatile boolean cellularOffhook;
+    private volatile String outboundCallId;
+    private volatile String outboundFromTag;
+    private volatile String outboundToHeader;
+    private volatile String outboundRequestUri;
+    private volatile String outboundViaBranch;
+
+    SipAudioBridge(Context context) {
+        this.context = context.getApplicationContext();
+    }
 
     void start() throws Exception {
         if (running) return;
@@ -112,6 +136,11 @@ final class SipAudioBridge {
         String first = firstLine(request);
         if (first == null) return;
 
+        if (first.startsWith("SIP/2.0 ")) {
+            handleSipResponse(request, peer, peerPort);
+            return;
+        }
+
         if (first.startsWith("INVITE ")) {
             int offeredPort = parseAudioPort(request);
             InetAddress offeredAddress = parseConnectionAddress(request, peer);
@@ -131,16 +160,7 @@ final class SipAudioBridge {
             sendSip(peer, peerPort, response(request, 100, "Trying", null));
 
             String ip = localIpv4();
-            String sdp =
-                    "v=0\r\n"
-                    + "o=osb 1 1 IN IP4 " + ip + "\r\n"
-                    + "s=OpenSIMBridge\r\n"
-                    + "c=IN IP4 " + ip + "\r\n"
-                    + "t=0 0\r\n"
-                    + "m=audio " + rtpSocket.getLocalPort() + " RTP/AVP 0\r\n"
-                    + "a=rtpmap:0 PCMU/8000\r\n"
-                    + "a=ptime:20\r\n"
-                    + "a=sendrecv\r\n";
+            String sdp = localSdp(ip);
 
             sendSip(peer, peerPort, response(request, 200, "OK", sdp));
 
@@ -164,20 +184,257 @@ final class SipAudioBridge {
             Log.i(TAG, "call ended by SIP peer");
             stopMedia();
             sendSip(peer, peerPort, response(request, 200, "OK", null));
+            if (outboundInviteActive) {
+                Log.i(TAG, "iPhone ended auto-forwarded SIP leg; GSM leg left to Telecom/peer");
+                resetOutboundDialog();
+            }
             MediaBridgeService.setStatus("listening sip:osb@" + localIpv4() + ":5060");
             return;
         }
 
-        if (first.startsWith("OPTIONS ")
-                || first.startsWith("INFO ")
-                || first.startsWith("REGISTER ")) {
+        if (first.startsWith("REGISTER ")) {
+            registeredSipAddress = peer;
+            registeredSipPort = peerPort;
+            Log.i(TAG, "Linphone registered at " + peer.getHostAddress() + ":" + peerPort);
             sendSip(peer, peerPort, response(request, 200, "OK", null));
             return;
         }
 
-        if (!first.startsWith("SIP/2.0 ")) {
-            sendSip(peer, peerPort, response(request, 501, "Not Implemented", null));
+        if (first.startsWith("OPTIONS ") || first.startsWith("INFO ")) {
+            sendSip(peer, peerPort, response(request, 200, "OK", null));
+            return;
         }
+
+        sendSip(peer, peerPort, response(request, 501, "Not Implemented", null));
+    }
+
+    void onCellularRinging(String incomingNumber) {
+        if (!running || mediaRunning || outboundInviteActive) return;
+
+        InetAddress peer = registeredSipAddress;
+        int port = registeredSipPort;
+        if (peer == null || port <= 0) {
+            Log.w(TAG, "GSM ringing but no Linphone REGISTER tuple is known yet");
+            MediaBridgeService.setStatus("GSM ringing · waiting for Linphone registration");
+            return;
+        }
+
+        try {
+            txPackets = 0;
+            rxPackets = 0;
+            cellularOffhook = false;
+            outboundSipAnswered = false;
+            outboundInviteActive = true;
+
+            String ip = localIpv4();
+            outboundCallId = System.currentTimeMillis() + "-" + Math.abs(new Random().nextInt())
+                    + "@opensimbridge";
+            outboundFromTag = "osb" + Integer.toHexString(new Random().nextInt());
+            outboundViaBranch = "z9hG4bK" + Long.toHexString(System.nanoTime());
+            outboundRequestUri = "sip:iphone@" + peer.getHostAddress() + ":" + port;
+
+            String caller = sanitizeDisplay(incomingNumber);
+            if (caller.isEmpty()) caller = "GSM incoming";
+
+            String sdp = localSdp(ip);
+            byte[] bodyBytes = sdp.getBytes(StandardCharsets.UTF_8);
+
+            StringBuilder invite = new StringBuilder();
+            invite.append("INVITE ").append(outboundRequestUri).append(" SIP/2.0\r\n");
+            invite.append("Via: SIP/2.0/UDP ").append(ip).append(":5060;branch=")
+                    .append(outboundViaBranch).append(";rport\r\n");
+            invite.append("Max-Forwards: 70\r\n");
+            invite.append("From: \"").append(caller).append("\" <sip:osb@")
+                    .append(ip).append(":5060>;tag=").append(outboundFromTag).append("\r\n");
+            invite.append("To: <").append(outboundRequestUri).append(">\r\n");
+            invite.append("Call-ID: ").append(outboundCallId).append("\r\n");
+            invite.append("CSeq: 1 INVITE\r\n");
+            invite.append("Contact: <sip:osb@").append(ip).append(":5060>\r\n");
+            invite.append("Content-Type: application/sdp\r\n");
+            invite.append("Content-Length: ").append(bodyBytes.length).append("\r\n\r\n");
+            invite.append(sdp);
+
+            Log.i(TAG, "GSM RINGING -> auto INVITE Linphone " + peer.getHostAddress() + ":" + port);
+            MediaBridgeService.setStatus("incoming GSM -> ringing iPhone");
+            sendSip(peer, port, invite.toString());
+        } catch (Exception e) {
+            Log.e(TAG, "auto INVITE failed", e);
+            resetOutboundDialog();
+        }
+    }
+
+    void onCellularOffhook() {
+        cellularOffhook = true;
+        Log.i(TAG, "cellular state OFFHOOK");
+        if (outboundInviteActive && outboundSipAnswered
+                && remoteRtpAddress != null && remoteRtpPort > 0) {
+            startMedia();
+        }
+    }
+
+    void onCellularIdle() {
+        cellularOffhook = false;
+        if (outboundInviteActive) {
+            Log.i(TAG, "cellular state IDLE -> terminate outbound SIP leg");
+            sendOutboundTerminate();
+        }
+        stopMedia();
+        resetOutboundDialog();
+    }
+
+    private void handleSipResponse(String responseText, InetAddress peer, int peerPort)
+            throws Exception {
+        if (!outboundInviteActive) return;
+
+        String cseq = header(responseText, "CSeq");
+        String callId = header(responseText, "Call-ID");
+        if (cseq == null || !cseq.toUpperCase(Locale.US).contains("INVITE")) return;
+        if (outboundCallId != null && callId != null && !outboundCallId.equals(callId)) return;
+
+        int code = parseStatusCode(firstLine(responseText));
+        if (code < 0) return;
+
+        if (code == 180 || code == 183) {
+            Log.i(TAG, "Linphone ringing SIP " + code);
+            MediaBridgeService.setStatus("iPhone ringing");
+            return;
+        }
+
+        if (code >= 200 && code < 300) {
+            int offeredPort = parseAudioPort(responseText);
+            InetAddress offeredAddress = parseConnectionAddress(responseText, peer);
+            if (offeredPort <= 0 || !offersPcmu(responseText)) {
+                Log.e(TAG, "Linphone 200 OK has no usable PCMU RTP");
+                resetOutboundDialog();
+                return;
+            }
+
+            outboundToHeader = header(responseText, "To");
+            remoteRtpAddress = offeredAddress;
+            remoteRtpPort = offeredPort;
+            registeredSipAddress = peer;
+            registeredSipPort = peerPort;
+
+            sendSip(peer, peerPort, outboundAck());
+            outboundSipAnswered = true;
+
+            Log.i(TAG, "Linphone answered auto INVITE; RTP "
+                    + offeredAddress.getHostAddress() + ":" + offeredPort);
+            answerCellularCall();
+            return;
+        }
+
+        if (code >= 300) {
+            Log.i(TAG, "Linphone rejected auto INVITE SIP " + code);
+            resetOutboundDialog();
+        }
+    }
+
+    private String localSdp(String ip) {
+        return "v=0\r\n"
+                + "o=osb 1 1 IN IP4 " + ip + "\r\n"
+                + "s=OpenSIMBridge\r\n"
+                + "c=IN IP4 " + ip + "\r\n"
+                + "t=0 0\r\n"
+                + "m=audio " + rtpSocket.getLocalPort() + " RTP/AVP 0\r\n"
+                + "a=rtpmap:0 PCMU/8000\r\n"
+                + "a=ptime:20\r\n"
+                + "a=sendrecv\r\n";
+    }
+
+    private String outboundAck() {
+        String ip = localIpv4();
+        String to = outboundToHeader == null
+                ? "<" + outboundRequestUri + ">"
+                : outboundToHeader;
+
+        return "ACK " + outboundRequestUri + " SIP/2.0\r\n"
+                + "Via: SIP/2.0/UDP " + ip + ":5060;branch=z9hG4bK"
+                + Long.toHexString(System.nanoTime()) + ";rport\r\n"
+                + "Max-Forwards: 70\r\n"
+                + "From: <sip:osb@" + ip + ":5060>;tag=" + outboundFromTag + "\r\n"
+                + "To: " + to + "\r\n"
+                + "Call-ID: " + outboundCallId + "\r\n"
+                + "CSeq: 1 ACK\r\n"
+                + "Contact: <sip:osb@" + ip + ":5060>\r\n"
+                + "Content-Length: 0\r\n\r\n";
+    }
+
+    private void answerCellularCall() {
+        if (Build.VERSION.SDK_INT < 26) return;
+        if (context.checkSelfPermission(Manifest.permission.ANSWER_PHONE_CALLS)
+                != PackageManager.PERMISSION_GRANTED) {
+            Log.e(TAG, "ANSWER_PHONE_CALLS missing; cannot auto-answer GSM");
+            MediaBridgeService.setStatus("iPhone answered · GSM answer permission missing");
+            return;
+        }
+
+        try {
+            TelecomManager telecom =
+                    (TelecomManager) context.getSystemService(Context.TELECOM_SERVICE);
+            if (telecom == null) {
+                Log.e(TAG, "TelecomManager unavailable");
+                return;
+            }
+            telecom.acceptRingingCall();
+            Log.i(TAG, "requested GSM answer after Linphone answer");
+            MediaBridgeService.setStatus("iPhone answered · answering GSM");
+        } catch (Exception e) {
+            Log.e(TAG, "GSM auto-answer failed", e);
+        }
+    }
+
+    private void sendOutboundTerminate() {
+        InetAddress peer = registeredSipAddress;
+        int port = registeredSipPort;
+        if (peer == null || port <= 0 || outboundRequestUri == null) return;
+
+        try {
+            String ip = localIpv4();
+            String method = outboundSipAnswered ? "BYE" : "CANCEL";
+            String to = outboundToHeader == null
+                    ? "<" + outboundRequestUri + ">"
+                    : outboundToHeader;
+            String branch = outboundSipAnswered
+                    ? "z9hG4bK" + Long.toHexString(System.nanoTime())
+                    : outboundViaBranch;
+            int cseq = outboundSipAnswered ? 2 : 1;
+
+            String msg = method + " " + outboundRequestUri + " SIP/2.0\r\n"
+                    + "Via: SIP/2.0/UDP " + ip + ":5060;branch=" + branch + ";rport\r\n"
+                    + "Max-Forwards: 70\r\n"
+                    + "From: <sip:osb@" + ip + ":5060>;tag=" + outboundFromTag + "\r\n"
+                    + "To: " + to + "\r\n"
+                    + "Call-ID: " + outboundCallId + "\r\n"
+                    + "CSeq: " + cseq + " " + method + "\r\n"
+                    + "Content-Length: 0\r\n\r\n";
+            sendSip(peer, port, msg);
+        } catch (Exception e) {
+            Log.w(TAG, "SIP terminate failed: " + safe(e));
+        }
+    }
+
+    private void resetOutboundDialog() {
+        outboundInviteActive = false;
+        outboundSipAnswered = false;
+        outboundCallId = null;
+        outboundFromTag = null;
+        outboundToHeader = null;
+        outboundRequestUri = null;
+        outboundViaBranch = null;
+    }
+
+    private static int parseStatusCode(String firstLine) {
+        if (firstLine == null || !firstLine.startsWith("SIP/2.0 ")) return -1;
+        String[] parts = firstLine.split("\\s+");
+        if (parts.length < 2) return -1;
+        try { return Integer.parseInt(parts[1]); }
+        catch (Exception ignored) { return -1; }
+    }
+
+    private static String sanitizeDisplay(String value) {
+        if (value == null) return "";
+        return value.replace("\r", "").replace("\n", "").replace("\"", "").trim();
     }
 
     private void startMedia() {
