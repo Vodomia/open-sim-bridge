@@ -16,3 +16,4 @@ dependencyResolutionManagement {
 
 rootProject.name = "OpenSimBridgeAndroid"
 include(":app")
+include(":media-bridge")
