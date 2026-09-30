@@ -10,7 +10,10 @@ final class VendorAudioControl {
     private VendorAudioControl() {}
 
     static boolean setCallForwarding(boolean enabled) {
-        String value = enabled ? "1" : "0";
+        // Samsung universal7870 HAL compares this parameter to the literal strings
+        // "on"/"off". Numeric 1/0 is accepted by AudioSystem.setParameters() but
+        // does not switch the vendor call-forwarding route.
+        String value = enabled ? "on" : "off";
         try {
             Class<?> audioSystem = Class.forName("android.media.AudioSystem");
             Method setParameters = audioSystem.getDeclaredMethod("setParameters", String.class);
@@ -31,6 +34,8 @@ final class VendorAudioControl {
                     "HAL call_forwarding=" + value + " rc=" + rc
                             + (current.isEmpty() ? "" : " get=" + current)
             );
+            // setParameters completed without throwing. Keep track of the requested
+            // state so stopMedia() always sends the matching "off" request later.
             return true;
         } catch (Throwable t) {
             Log.e(TAG, "HAL call_forwarding reflection failed", t);
