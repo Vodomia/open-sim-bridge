@@ -5,6 +5,7 @@ import android.media.AudioManager;
 import android.media.AudioRecord;
 import android.media.AudioTrack;
 import android.media.MediaRecorder;
+import android.util.Log;
 
 import java.net.DatagramPacket;
 import java.net.DatagramSocket;
@@ -19,9 +20,16 @@ import java.util.Locale;
 import java.util.Random;
 
 final class SipAudioBridge {
+    private static final String TAG = "OSB-M5";
     private static final int SIP_PORT = 5060;
-    private static final int SAMPLE_RATE = 8000;
-    private static final int SAMPLES_PER_PACKET = 160;
+
+    // Proven working on this SM-G610F during the privileged-audio probe.
+    private static final int DEVICE_SAMPLE_RATE = 16000;
+
+    // Linphone interop: RTP payload type 0 = G.711 µ-law @ 8000 Hz.
+    private static final int RTP_SAMPLE_RATE = 8000;
+    private static final int RTP_SAMPLES_PER_PACKET = 160;   // 20 ms
+    private static final int DEVICE_SAMPLES_PER_PACKET = 320; // 20 ms @ 16 kHz
 
     private volatile boolean running;
     private volatile boolean mediaRunning;
@@ -35,6 +43,9 @@ final class SipAudioBridge {
     private volatile InetAddress remoteRtpAddress;
     private volatile int remoteRtpPort;
 
+    private volatile long txPackets;
+    private volatile long rxPackets;
+
     void start() throws Exception {
         if (running) return;
 
@@ -45,6 +56,11 @@ final class SipAudioBridge {
         rtpSocket.setSoTimeout(1000);
 
         running = true;
+        Log.i(TAG, "SIP listening UDP " + SIP_PORT + ", RTP local UDP " + rtpSocket.getLocalPort());
+        MediaBridgeService.setStatus(
+                "listening sip:osb@" + localIpv4() + ":5060 · RTP local " + rtpSocket.getLocalPort()
+        );
+
         sipThread = new Thread(this::sipLoop, "osb-sip");
         sipThread.start();
     }
@@ -76,10 +92,15 @@ final class SipAudioBridge {
                         StandardCharsets.UTF_8
                 );
 
+                String first = firstLine(request);
+                Log.i(TAG, "SIP RX " + packet.getAddress().getHostAddress() + ":" + packet.getPort()
+                        + " " + first);
+
                 handleSip(request, packet.getAddress(), packet.getPort());
             } catch (SocketTimeoutException ignored) {
             } catch (Exception e) {
                 if (running) {
+                    Log.e(TAG, "SIP loop error", e);
                     MediaBridgeService.setStatus("SIP error: " + safe(e));
                 }
             }
@@ -92,14 +113,19 @@ final class SipAudioBridge {
 
         if (first.startsWith("INVITE ")) {
             int offeredPort = parseAudioPort(request);
+            InetAddress offeredAddress = parseConnectionAddress(request, peer);
+
             if (offeredPort <= 0 || !offersPcmu(request)) {
+                Log.w(TAG, "INVITE rejected: PCMU not offered or bad RTP port=" + offeredPort);
                 sendSip(peer, peerPort, response(request, 488, "Not Acceptable Here", null));
                 return;
             }
 
             stopMedia();
-            remoteRtpAddress = peer;
+            remoteRtpAddress = offeredAddress;
             remoteRtpPort = offeredPort;
+            txPackets = 0;
+            rxPackets = 0;
 
             sendSip(peer, peerPort, response(request, 100, "Trying", null));
 
@@ -116,14 +142,17 @@ final class SipAudioBridge {
                     + "a=sendrecv\r\n";
 
             sendSip(peer, peerPort, response(request, 200, "OK", sdp));
+
+            Log.i(TAG, "INVITE accepted; remote RTP "
+                    + remoteRtpAddress.getHostAddress() + ":" + remoteRtpPort
+                    + ", local RTP " + rtpSocket.getLocalPort());
+
             startMedia();
-            MediaBridgeService.setStatus(
-                    "media connected to " + peer.getHostAddress() + ":" + offeredPort
-            );
             return;
         }
 
         if (first.startsWith("ACK ")) {
+            Log.i(TAG, "ACK received");
             if (!mediaRunning && remoteRtpAddress != null && remoteRtpPort > 0) {
                 startMedia();
             }
@@ -131,9 +160,10 @@ final class SipAudioBridge {
         }
 
         if (first.startsWith("BYE ") || first.startsWith("CANCEL ")) {
+            Log.i(TAG, "call ended by SIP peer");
             stopMedia();
             sendSip(peer, peerPort, response(request, 200, "OK", null));
-            MediaBridgeService.setStatus("listening on sip:osb@" + localIpv4() + ":5060");
+            MediaBridgeService.setStatus("listening sip:osb@" + localIpv4() + ":5060");
             return;
         }
 
@@ -153,6 +183,11 @@ final class SipAudioBridge {
         if (mediaRunning || remoteRtpAddress == null || remoteRtpPort <= 0) return;
 
         mediaRunning = true;
+        Log.i(TAG, "starting media; Android side 16k PCM, RTP PCMU/8k");
+        MediaBridgeService.setStatus(
+                "media starting → " + remoteRtpAddress.getHostAddress() + ":" + remoteRtpPort
+        );
+
         txThread = new Thread(this::sendAudioLoop, "osb-rtp-downlink");
         rxThread = new Thread(this::receiveAudioLoop, "osb-rtp-uplink");
         txThread.start();
@@ -180,30 +215,35 @@ final class SipAudioBridge {
 
         try {
             int min = AudioRecord.getMinBufferSize(
-                    SAMPLE_RATE,
+                    DEVICE_SAMPLE_RATE,
                     AudioFormat.CHANNEL_IN_MONO,
                     AudioFormat.ENCODING_PCM_16BIT
             );
-            int bufferBytes = Math.max(min * 4, 4096);
+            int bufferBytes = Math.max(min * 4, 8192);
+
+            Log.i(TAG, "VOICE_DOWNLINK AudioRecord min=" + min + " buffer=" + bufferBytes);
 
             record = new AudioRecord(
                     MediaRecorder.AudioSource.VOICE_DOWNLINK,
-                    SAMPLE_RATE,
+                    DEVICE_SAMPLE_RATE,
                     AudioFormat.CHANNEL_IN_MONO,
                     AudioFormat.ENCODING_PCM_16BIT,
                     bufferBytes
             );
 
             if (record.getState() != AudioRecord.STATE_INITIALIZED) {
-                MediaBridgeService.setStatus("VOICE_DOWNLINK AudioRecord init failed");
+                Log.e(TAG, "VOICE_DOWNLINK AudioRecord not initialized");
+                MediaBridgeService.setStatus("VOICE_DOWNLINK 16k init failed");
                 mediaRunning = false;
                 return;
             }
 
             record.startRecording();
+            Log.i(TAG, "VOICE_DOWNLINK recording started");
 
-            short[] pcm = new short[SAMPLES_PER_PACKET];
-            byte[] packet = new byte[12 + SAMPLES_PER_PACKET];
+            short[] pcm16 = new short[DEVICE_SAMPLES_PER_PACKET];
+            byte[] packet = new byte[12 + RTP_SAMPLES_PER_PACKET];
+
             Random random = new Random();
             int seq = random.nextInt(65536);
             long timestamp = random.nextInt() & 0xffffffffL;
@@ -211,8 +251,8 @@ final class SipAudioBridge {
             boolean marker = true;
 
             while (mediaRunning) {
-                int got = readExact(record, pcm, SAMPLES_PER_PACKET);
-                if (got != SAMPLES_PER_PACKET) continue;
+                int got = readExact(record, pcm16, DEVICE_SAMPLES_PER_PACKET);
+                if (got != DEVICE_SAMPLES_PER_PACKET) continue;
 
                 packet[0] = (byte) 0x80;
                 packet[1] = (byte) (marker ? 0x80 : 0x00);
@@ -231,8 +271,12 @@ final class SipAudioBridge {
                 packet[10] = (byte) ((ssrc >>> 8) & 0xff);
                 packet[11] = (byte) (ssrc & 0xff);
 
-                for (int i = 0; i < SAMPLES_PER_PACKET; i++) {
-                    packet[12 + i] = linearToMuLaw(pcm[i]);
+                // 16 kHz -> 8 kHz: average each adjacent pair before µ-law encoding.
+                for (int i = 0; i < RTP_SAMPLES_PER_PACKET; i++) {
+                    int a = pcm16[i * 2];
+                    int b = pcm16[i * 2 + 1];
+                    short down = (short) ((a + b) / 2);
+                    packet[12 + i] = linearToMuLaw(down);
                 }
 
                 InetAddress dst = remoteRtpAddress;
@@ -241,10 +285,19 @@ final class SipAudioBridge {
 
                 rtpSocket.send(new DatagramPacket(packet, packet.length, dst, port));
 
+                txPackets++;
+                if (txPackets == 1 || txPackets % 250 == 0) {
+                    Log.i(TAG, "RTP TX packets=" + txPackets + " to "
+                            + dst.getHostAddress() + ":" + port
+                            + " RX=" + rxPackets);
+                    updateMediaStatus();
+                }
+
                 seq = (seq + 1) & 0xffff;
-                timestamp = (timestamp + SAMPLES_PER_PACKET) & 0xffffffffL;
+                timestamp = (timestamp + RTP_SAMPLES_PER_PACKET) & 0xffffffffL;
             }
         } catch (Exception e) {
+            Log.e(TAG, "downlink error", e);
             if (mediaRunning) MediaBridgeService.setStatus("downlink error: " + safe(e));
         } finally {
             if (record != null) {
@@ -263,15 +316,17 @@ final class SipAudioBridge {
 
         try {
             int min = AudioTrack.getMinBufferSize(
-                    SAMPLE_RATE,
+                    DEVICE_SAMPLE_RATE,
                     AudioFormat.CHANNEL_OUT_MONO,
                     AudioFormat.ENCODING_PCM_16BIT
             );
-            int bufferBytes = Math.max(min * 4, 4096);
+            int bufferBytes = Math.max(min * 4, 8192);
+
+            Log.i(TAG, "VOICE_CALL AudioTrack min=" + min + " buffer=" + bufferBytes);
 
             track = new AudioTrack(
                     AudioManager.STREAM_VOICE_CALL,
-                    SAMPLE_RATE,
+                    DEVICE_SAMPLE_RATE,
                     AudioFormat.CHANNEL_OUT_MONO,
                     AudioFormat.ENCODING_PCM_16BIT,
                     bufferBytes,
@@ -279,16 +334,18 @@ final class SipAudioBridge {
             );
 
             if (track.getState() != AudioTrack.STATE_INITIALIZED) {
-                MediaBridgeService.setStatus("VOICE_CALL AudioTrack init failed");
+                Log.e(TAG, "VOICE_CALL AudioTrack not initialized");
+                MediaBridgeService.setStatus("VOICE_CALL 16k init failed");
                 mediaRunning = false;
                 return;
             }
 
             track.setVolume(1.0f);
             track.play();
+            Log.i(TAG, "VOICE_CALL AudioTrack started");
 
-            byte[] data = new byte[2048];
-            short[] pcm = new short[1600];
+            byte[] data = new byte[4096];
+            short[] pcm16 = new short[4096];
 
             while (mediaRunning) {
                 try {
@@ -320,22 +377,40 @@ final class SipAudioBridge {
 
                     int payload = len - offset;
                     if (payload <= 0) continue;
-                    if (payload > pcm.length) payload = pcm.length;
 
-                    for (int i = 0; i < payload; i++) {
-                        pcm[i] = muLawToLinear(data[offset + i]);
+                    // Symmetric RTP: once Linphone sends media, send back to its real source tuple.
+                    remoteRtpAddress = packet.getAddress();
+                    remoteRtpPort = packet.getPort();
+
+                    // 8 kHz µ-law -> 16 kHz PCM: duplicate each decoded sample.
+                    int outSamples = Math.min(payload * 2, pcm16.length);
+                    int usablePayload = outSamples / 2;
+                    for (int i = 0; i < usablePayload; i++) {
+                        short s = muLawToLinear(data[offset + i]);
+                        pcm16[i * 2] = s;
+                        pcm16[i * 2 + 1] = s;
                     }
 
                     int written = 0;
-                    while (written < payload && mediaRunning) {
-                        int n = track.write(pcm, written, payload - written);
+                    while (written < outSamples && mediaRunning) {
+                        int n = track.write(pcm16, written, outSamples - written);
                         if (n <= 0) break;
                         written += n;
                     }
+
+                    rxPackets++;
+                    if (rxPackets == 1 || rxPackets % 250 == 0) {
+                        Log.i(TAG, "RTP RX packets=" + rxPackets + " from "
+                                + packet.getAddress().getHostAddress() + ":" + packet.getPort()
+                                + " TX=" + txPackets);
+                        updateMediaStatus();
+                    }
                 } catch (SocketTimeoutException ignored) {
+                    if (mediaRunning && txPackets > 0) updateMediaStatus();
                 }
             }
         } catch (Exception e) {
+            Log.e(TAG, "uplink error", e);
             if (mediaRunning) MediaBridgeService.setStatus("uplink error: " + safe(e));
         } finally {
             if (track != null) {
@@ -343,6 +418,17 @@ final class SipAudioBridge {
                 try { track.release(); } catch (Exception ignored) {}
             }
         }
+    }
+
+    private void updateMediaStatus() {
+        InetAddress addr = remoteRtpAddress;
+        MediaBridgeService.setStatus(
+                "media "
+                        + (addr == null ? "?" : addr.getHostAddress())
+                        + ":" + remoteRtpPort
+                        + " · RTP TX=" + txPackets
+                        + " RX=" + rxPackets
+        );
     }
 
     private static int readExact(AudioRecord record, short[] out, int wanted) {
@@ -358,6 +444,7 @@ final class SipAudioBridge {
     private void sendSip(InetAddress address, int port, String text) throws Exception {
         byte[] bytes = text.getBytes(StandardCharsets.UTF_8);
         sipSocket.send(new DatagramPacket(bytes, bytes.length, address, port));
+        Log.i(TAG, "SIP TX " + address.getHostAddress() + ":" + port + " " + firstLine(text));
     }
 
     private static String response(String request, int code, String reason, String sdp) {
@@ -382,6 +469,7 @@ final class SipAudioBridge {
         if (callId != null) out.append("Call-ID: ").append(callId).append("\r\n");
         if (cseq != null) out.append("CSeq: ").append(cseq).append("\r\n");
         out.append("Server: OpenSIMBridge-M5\r\n");
+        out.append("Allow: INVITE, ACK, BYE, CANCEL, OPTIONS, INFO\r\n");
 
         if (code >= 200 && code < 300 && request.startsWith("INVITE ")) {
             out.append("Contact: <sip:osb@").append(localIpv4()).append(":5060>\r\n");
@@ -398,6 +486,7 @@ final class SipAudioBridge {
     }
 
     private static String firstLine(String text) {
+        if (text == null) return null;
         int p = text.indexOf("\r\n");
         if (p < 0) p = text.indexOf('\n');
         return p < 0 ? text.trim() : text.substring(0, p).trim();
@@ -427,6 +516,22 @@ final class SipAudioBridge {
             }
         }
         return -1;
+    }
+
+    private static InetAddress parseConnectionAddress(String sdp, InetAddress fallback) {
+        String[] lines = sdp.split("\\r?\\n");
+        for (String line : lines) {
+            if (line.startsWith("c=IN IP4 ")) {
+                String host = line.substring("c=IN IP4 ".length()).trim();
+                try {
+                    InetAddress parsed = InetAddress.getByName(host);
+                    if (!parsed.isAnyLocalAddress() && !parsed.isMulticastAddress()) {
+                        return parsed;
+                    }
+                } catch (Exception ignored) {}
+            }
+        }
+        return fallback;
     }
 
     private static boolean offersPcmu(String sdp) {
