@@ -63,6 +63,7 @@ final class SipAudioBridge {
     // remember the ring and place the SIP INVITE as soon as REGISTER arrives.
     private volatile boolean pendingCellularRing;
     private volatile String pendingIncomingNumber = "";
+    private volatile boolean cellularRinging;
 
     // Outbound SIP dialog used to ring the iPhone for an incoming GSM call.
     private volatile boolean outboundInviteActive;
@@ -73,6 +74,8 @@ final class SipAudioBridge {
     private volatile String outboundToHeader;
     private volatile String outboundRequestUri;
     private volatile String outboundViaBranch;
+    private volatile InetAddress outboundSipAddress;
+    private volatile int outboundSipPort;
 
     SipAudioBridge(Context context) {
         this.context = context.getApplicationContext();
@@ -210,7 +213,15 @@ final class SipAudioBridge {
             Log.i(TAG, "SIP client registered at " + peer.getHostAddress() + ":" + peerPort);
             sendSip(peer, peerPort, registerResponse(request));
 
-            if (pendingCellularRing && !outboundInviteActive && !mediaRunning) {
+            if (cellularRinging && outboundInviteActive && !outboundSipAnswered
+                    && (outboundSipAddress == null
+                    || !outboundSipAddress.equals(peer)
+                    || outboundSipPort != peerPort)) {
+                Log.i(TAG, "SIP client re-registered while GSM still ringing -> retarget INVITE");
+                String number = pendingIncomingNumber;
+                resetOutboundDialog();
+                onCellularRinging(number);
+            } else if (pendingCellularRing && !outboundInviteActive && !mediaRunning) {
                 Log.i(TAG, "pending GSM ring found after REGISTER -> auto INVITE now");
                 onCellularRinging(pendingIncomingNumber);
             }
@@ -226,13 +237,14 @@ final class SipAudioBridge {
     }
 
     void onCellularRinging(String incomingNumber) {
+        cellularRinging = true;
         pendingCellularRing = true;
         pendingIncomingNumber = incomingNumber == null ? "" : incomingNumber;
 
         if (!running || mediaRunning || outboundInviteActive) return;
 
-        InetAddress peer = registeredSipAddress;
-        int port = registeredSipPort;
+        InetAddress peer = outboundSipAddress != null ? outboundSipAddress : registeredSipAddress;
+        int port = outboundSipPort > 0 ? outboundSipPort : registeredSipPort;
         if (peer == null || port <= 0) {
             Log.w(TAG, "GSM ringing but no Linphone REGISTER tuple is known yet");
             MediaBridgeService.setStatus("GSM ringing · waiting for Linphone registration");
@@ -251,6 +263,8 @@ final class SipAudioBridge {
                     + "@opensimbridge";
             outboundFromTag = "osb" + Integer.toHexString(new Random().nextInt());
             outboundViaBranch = "z9hG4bK" + Long.toHexString(System.nanoTime());
+            outboundSipAddress = peer;
+            outboundSipPort = port;
             outboundRequestUri = "sip:iphone@" + peer.getHostAddress() + ":" + port;
 
             String caller = sanitizeDisplay(incomingNumber);
@@ -294,6 +308,7 @@ final class SipAudioBridge {
     }
 
     void onCellularOffhook() {
+        cellularRinging = false;
         pendingCellularRing = false;
         pendingIncomingNumber = "";
         cellularOffhook = true;
@@ -305,6 +320,7 @@ final class SipAudioBridge {
     }
 
     void onCellularIdle() {
+        cellularRinging = false;
         pendingCellularRing = false;
         pendingIncomingNumber = "";
         cellularOffhook = false;
@@ -499,6 +515,8 @@ final class SipAudioBridge {
         outboundToHeader = null;
         outboundRequestUri = null;
         outboundViaBranch = null;
+        outboundSipAddress = null;
+        outboundSipPort = 0;
     }
 
     private static int parseStatusCode(String firstLine) {
@@ -663,7 +681,9 @@ final class SipAudioBridge {
                     AudioFormat.CHANNEL_OUT_MONO,
                     AudioFormat.ENCODING_PCM_16BIT
             );
-            int bufferBytes = Math.max(min * 4, 8192);
+            // M8.1: keep two minimum buffers instead of four. On this J7 min=2592,
+            // reducing the stream buffer from 10368 to 5184 bytes while keeping margin.
+            int bufferBytes = Math.max(min * 2, 4096);
 
             Log.i(TAG, "VOICE_CALL AudioTrack min=" + min + " buffer=" + bufferBytes);
 
